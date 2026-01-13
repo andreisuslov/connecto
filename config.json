@@ -1,0 +1,7 @@
+{
+  "cloudflare_access": {
+    "client_id": "e60f3ee8852d05023b251ff55ba66621.access",
+    "client_secret": "e358276618537c16b71b75727b268fe047dc34bcc091dc9de55f8489e3bf057c",
+    "ssh_host": "ssh.andreisuslov.com"
+  }
+}
