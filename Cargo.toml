@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+    "connecto_core",
+    "connecto_cli",
+    # "connecto_gui",  # Requires WebKitGTK system libraries
+]
+
+# Note: connecto_gui can be built on systems with WebKitGTK installed
+# To build, uncomment the line above and run: cargo build -p connecto_gui
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Connecto Team"]
+description = "AirDrop-like SSH pairing application"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# mDNS discovery
+mdns-sd = "0.11"
+
+# SSH key management
+ssh-key = { version = "0.6", features = ["ed25519", "rsa", "std"] }
+rand = "0.8"
+
+# Networking
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI specific
+clap = { version = "4.4", features = ["derive"] }
+colored = "2.1"
+dialoguer = "0.11"
+indicatif = "0.17"
+directories = "5.0"
+
+# Testing
+mockall = "0.12"
+tempfile = "3.10"
