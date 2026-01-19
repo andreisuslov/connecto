@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Connecto - SSH Key Pairing</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Connecto</h1>
+            <p class="subtitle">SSH Key Pairing Made Easy</p>
+        </header>
+
+        <nav class="tabs">
+            <button class="tab active" data-tab="scan">Scan & Pair</button>
+            <button class="tab" data-tab="listen">Listen</button>
+            <button class="tab" data-tab="keys">Keys</button>
+        </nav>
+
+        <!-- Scan & Pair Tab -->
+        <section id="scan" class="tab-content active">
+            <div class="card">
+                <h2>Discover Devices</h2>
+                <p class="description">Find devices running Connecto on your network</p>
+
+                <div class="scan-controls">
+                    <button id="scanBtn" class="btn primary">
+                        <span class="icon">🔍</span>
+                        Scan Network
+                    </button>
+                    <select id="scanTimeout">
+                        <option value="3">3 seconds</option>
+                        <option value="5" selected>5 seconds</option>
+                        <option value="10">10 seconds</option>
+                    </select>
+                </div>
+
+                <div id="scanStatus" class="status hidden"></div>
+
+                <div id="deviceList" class="device-list">
+                    <p class="empty-state">No devices found. Click "Scan Network" to search.</p>
+                </div>
+            </div>
+
+            <div id="pairResult" class="card result-card hidden">
+                <h2>Pairing Result</h2>
+                <div id="pairResultContent"></div>
+            </div>
+        </section>
+
+        <!-- Listen Tab -->
+        <section id="listen" class="tab-content">
+            <div class="card">
+                <h2>Listen for Pairing Requests</h2>
+                <p class="description">Allow other devices to pair with this machine</p>
+
+                <div class="listen-info">
+                    <div class="info-item">
+                        <label>Device Name:</label>
+                        <input type="text" id="deviceName" placeholder="Auto-detected">
+                    </div>
+                    <div class="info-item">
+                        <label>Port:</label>
+                        <input type="number" id="listenPort" value="8099" min="1024" max="65535">
+                    </div>
+                </div>
+
+                <div class="listen-addresses" id="listenAddresses"></div>
+
+                <div class="listen-controls">
+                    <button id="startListenBtn" class="btn primary">
+                        <span class="icon">📡</span>
+                        Start Listening
+                    </button>
+                    <button id="stopListenBtn" class="btn danger hidden">
+                        <span class="icon">⏹</span>
+                        Stop Listening
+                    </button>
+                </div>
+
+                <div id="listenStatus" class="status hidden"></div>
+            </div>
+        </section>
+
+        <!-- Keys Tab -->
+        <section id="keys" class="tab-content">
+            <div class="card">
+                <h2>Authorized Keys</h2>
+                <p class="description">Manage SSH keys authorized for this machine</p>
+
+                <button id="refreshKeysBtn" class="btn secondary">
+                    <span class="icon">🔄</span>
+                    Refresh
+                </button>
+
+                <div id="keysList" class="keys-list">
+                    <p class="empty-state">Loading...</p>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Generate New Key Pair</h2>
+                <p class="description">Create a new SSH key pair on this machine</p>
+
+                <div class="keygen-form">
+                    <div class="form-group">
+                        <label for="keygenName">Key Name:</label>
+                        <input type="text" id="keygenName" placeholder="my_key">
+                    </div>
+                    <div class="form-group">
+                        <label for="keygenComment">Comment:</label>
+                        <input type="text" id="keygenComment" placeholder="user@hostname (auto)">
+                    </div>
+                    <div class="form-group checkbox">
+                        <input type="checkbox" id="keygenRsa">
+                        <label for="keygenRsa">Use RSA-4096 (Ed25519 recommended)</label>
+                    </div>
+                    <button id="generateKeyBtn" class="btn primary">
+                        <span class="icon">🔑</span>
+                        Generate Key Pair
+                    </button>
+                </div>
+
+                <div id="keygenResult" class="keygen-result hidden"></div>
+            </div>
+        </section>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
