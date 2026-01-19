@@ -9,6 +9,9 @@ use connecto_core::{
     DEFAULT_PORT,
 };
 use indicatif::{ProgressBar, ProgressStyle};
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use super::scan::load_cached_devices;
@@ -87,33 +90,43 @@ pub async fn run(target: String, comment: Option<String>, rsa: bool) -> Result<(
             );
             println!();
 
-            // Show SSH command
+            // Auto-configure SSH config
             let primary_ip = extract_ip_from_address(&address);
-            println!("{}", "You can now connect with:".bold());
-            println!();
-            println!(
-                "  {}",
-                format!(
-                    "ssh -i {} {}@{}",
-                    private_path.display(),
-                    pairing_result.ssh_user,
-                    primary_ip
-                )
-                .cyan()
-                .bold()
-            );
-            println!();
+            let host_alias = sanitize_name(&pairing_result.server_name);
 
-            // Show how to add to SSH config
-            println!("{}", "Or add this to your ~/.ssh/config:".dimmed());
-            println!();
-            println!("  {}", format!("Host {}", pairing_result.server_name.replace(' ', "-")).dimmed());
-            println!("  {}", format!("    HostName {}", primary_ip).dimmed());
-            println!("  {}", format!("    User {}", pairing_result.ssh_user).dimmed());
-            println!(
-                "  {}",
-                format!("    IdentityFile {}", private_path.display()).dimmed()
-            );
+            match add_to_ssh_config(&host_alias, &primary_ip, &pairing_result.ssh_user, &private_path) {
+                Ok(true) => {
+                    success(&format!("Added to ~/.ssh/config as '{}'", host_alias));
+                    println!();
+                    println!("{}", "You can now connect with:".bold());
+                    println!();
+                    println!("  {}", format!("ssh {}", host_alias).cyan().bold());
+                }
+                Ok(false) => {
+                    info(&format!("Host '{}' already in ~/.ssh/config", host_alias));
+                    println!();
+                    println!("{}", "You can connect with:".bold());
+                    println!();
+                    println!("  {}", format!("ssh {}", host_alias).cyan().bold());
+                }
+                Err(e) => {
+                    warn(&format!("Could not update ~/.ssh/config: {}", e));
+                    println!();
+                    println!("{}", "You can connect with:".bold());
+                    println!();
+                    println!(
+                        "  {}",
+                        format!(
+                            "ssh -i {} {}@{}",
+                            private_path.display(),
+                            pairing_result.ssh_user,
+                            primary_ip
+                        )
+                        .cyan()
+                        .bold()
+                    );
+                }
+            }
             println!();
         }
         Err(e) => {
@@ -132,7 +145,7 @@ pub async fn run(target: String, comment: Option<String>, rsa: bool) -> Result<(
 }
 
 fn resolve_target(target: &str) -> Result<String> {
-    // First, check if it's a number (device index from scan)
+    // First, check if it's a number (device index from scan, 0-based)
     if let Ok(index) = target.parse::<usize>() {
         let devices = load_cached_devices().map_err(|_| {
             anyhow!(
@@ -140,14 +153,15 @@ fn resolve_target(target: &str) -> Result<String> {
             )
         })?;
 
-        if index == 0 || index > devices.len() {
+        if index >= devices.len() {
             return Err(anyhow!(
-                "Invalid device number {}. Run 'connecto scan' to see available devices.",
-                index
+                "Invalid device number {}. Run 'connecto scan' to see available devices (0-{}).",
+                index,
+                devices.len().saturating_sub(1)
             ));
         }
 
-        let device = &devices[index - 1];
+        let device = &devices[index];
         device.connection_string().ok_or_else(|| {
             anyhow!("Device {} has no IP address", device.name)
         })
@@ -173,6 +187,57 @@ fn extract_ip_from_address(address: &str) -> String {
         .next()
         .unwrap_or(address)
         .to_string()
+}
+
+/// Add a host entry to ~/.ssh/config
+/// Returns Ok(true) if added, Ok(false) if already exists, Err on failure
+fn add_to_ssh_config(host: &str, hostname: &str, user: &str, identity_file: &PathBuf) -> Result<bool> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| anyhow!("HOME/USERPROFILE not set"))?;
+    let ssh_dir = PathBuf::from(&home).join(".ssh");
+    let config_path = ssh_dir.join("config");
+
+    // Create .ssh directory if it doesn't exist
+    if !ssh_dir.exists() {
+        std::fs::create_dir_all(&ssh_dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+
+    // Check if host already exists in config
+    if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)?;
+        let host_pattern = format!("Host {}", host);
+        if content.lines().any(|line| line.trim() == host_pattern || line.trim() == format!("Host {}", host)) {
+            return Ok(false); // Already exists
+        }
+    }
+
+    // Append to config
+    let entry = format!(
+        "\n# Added by connecto\nHost {}\n    HostName {}\n    User {}\n    IdentityFile {}\n",
+        host, hostname, user, identity_file.display()
+    );
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&config_path)?;
+
+    file.write_all(entry.as_bytes())?;
+
+    // Set proper permissions on config file
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    Ok(true)
 }
 
 #[cfg(test)]

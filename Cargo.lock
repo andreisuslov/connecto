@@ -207,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "connecto_cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -216,6 +216,7 @@ dependencies = [
  "dialoguer",
  "directories",
  "indicatif",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -225,7 +226,7 @@ dependencies = [
 
 [[package]]
 name = "connecto_core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "directories",
