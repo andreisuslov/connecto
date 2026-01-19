@@ -1,0 +1,24 @@
+VERIFICATION
+
+Verification is intended to assist the Chocolatey moderators and community
+in verifying that this package's contents are trustworthy.
+
+This package is published by the project maintainer and the binaries are
+identical to those published on the GitHub Releases page.
+
+1. Download the official release from:
+   https://github.com/andreisuslov/ssh/releases
+
+2. Download the file: connecto-windows-x86_64.zip
+
+3. Verify the checksum matches the one in chocolateyInstall.ps1:
+   - Use PowerShell: Get-FileHash connecto-windows-x86_64.zip -Algorithm SHA256
+   - Or use certutil: certutil -hashfile connecto-windows-x86_64.zip SHA256
+
+4. The checksum should match the $checksum variable in chocolateyInstall.ps1
+
+The source code is available at:
+https://github.com/andreisuslov/ssh
+
+The license (MIT) is available at:
+https://github.com/andreisuslov/ssh/blob/main/LICENSE

@@ -76,12 +76,24 @@ You can now connect with:
 
 ## Installation
 
+### macOS (Homebrew)
+
+```bash
+brew install andreisuslov/connecto/connecto
+```
+
+### Windows (Chocolatey)
+
+```cmd
+choco install connecto
+```
+
 ### From Source
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/connecto
-cd connecto
+git clone https://github.com/andreisuslov/ssh
+cd ssh
 
 # Build and install
 cargo install --path connecto_cli
@@ -89,7 +101,7 @@ cargo install --path connecto_cli
 
 ### Binary Releases
 
-Download pre-built binaries from the [Releases](https://github.com/yourusername/connecto/releases) page.
+Download pre-built binaries from the [Releases](https://github.com/andreisuslov/ssh/releases) page.
 
 ## CLI Commands
 
