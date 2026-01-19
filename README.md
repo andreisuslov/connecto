@@ -175,6 +175,63 @@ Options:
       --rsa                Generate RSA key instead of Ed25519
 ```
 
+### `connecto unpair`
+
+Remove a paired host and delete its keys.
+
+```bash
+connecto unpair mydesktop
+```
+
+### `connecto test`
+
+Test SSH connection to a paired host.
+
+```bash
+connecto test mydesktop
+```
+
+### `connecto update-ip`
+
+Update IP address for a host that moved networks.
+
+```bash
+connecto update-ip mydesktop 192.168.1.100
+```
+
+### `connecto export/import`
+
+Backup and restore paired hosts configuration.
+
+```bash
+# Export to file
+connecto export -o backup.json
+
+# Export to stdout
+connecto export
+
+# Import from file
+connecto import backup.json
+```
+
+### `connecto completions`
+
+Generate shell completions.
+
+```bash
+# Bash
+connecto completions bash >> ~/.bashrc
+
+# Zsh
+connecto completions zsh >> ~/.zshrc
+
+# Fish
+connecto completions fish > ~/.config/fish/completions/connecto.fish
+
+# PowerShell
+connecto completions powershell >> $PROFILE
+```
+
 ## How It Works
 
 ### Same Network (mDNS)
