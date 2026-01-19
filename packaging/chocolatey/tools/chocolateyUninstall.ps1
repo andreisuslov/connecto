@@ -10,4 +10,9 @@ if (Test-Path $exePath) {
     Write-Host "Removed $exePath"
 }
 
+# Remove firewall rules
+Remove-NetFirewallRule -DisplayName "Connecto mDNS" -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -DisplayName "Connecto TCP" -ErrorAction SilentlyContinue
+Write-Host "Removed firewall rules."
+
 Write-Host "$packageName has been uninstalled."

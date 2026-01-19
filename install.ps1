@@ -7,6 +7,9 @@ $ErrorActionPreference = "Stop"
 $repo = "andreisuslov/connecto"
 $installDir = "$env:LOCALAPPDATA\connecto"
 
+# Check for admin rights (needed for firewall rules)
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
 Write-Host "Installing Connecto..." -ForegroundColor Cyan
 
 # Get latest release
@@ -36,6 +39,29 @@ if ($userPath -notlike "*$installDir*") {
     [Environment]::SetEnvironmentVariable("PATH", "$userPath;$installDir", "User")
     $env:PATH += ";$installDir"
     Write-Host "Added $installDir to PATH" -ForegroundColor Green
+}
+
+# Configure firewall rules for mDNS discovery
+if ($isAdmin) {
+    Write-Host "Configuring firewall rules..." -ForegroundColor Cyan
+
+    # Remove existing rules if they exist (to avoid duplicates)
+    Remove-NetFirewallRule -DisplayName "Connecto mDNS" -ErrorAction SilentlyContinue
+    Remove-NetFirewallRule -DisplayName "Connecto TCP" -ErrorAction SilentlyContinue
+
+    # Add firewall rules
+    New-NetFirewallRule -DisplayName "Connecto mDNS" -Direction Inbound -Protocol UDP -LocalPort 5353 -Action Allow | Out-Null
+    New-NetFirewallRule -DisplayName "Connecto TCP" -Direction Inbound -Protocol TCP -LocalPort 8099 -Action Allow | Out-Null
+
+    Write-Host "Firewall rules configured." -ForegroundColor Green
+} else {
+    Write-Host ""
+    Write-Host "Warning: Run as Administrator to configure firewall rules for mDNS discovery." -ForegroundColor Yellow
+    Write-Host "Without firewall rules, 'connecto scan' may not discover devices." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "To add firewall rules manually, run PowerShell as Administrator and execute:" -ForegroundColor Yellow
+    Write-Host "  New-NetFirewallRule -DisplayName 'Connecto mDNS' -Direction Inbound -Protocol UDP -LocalPort 5353 -Action Allow" -ForegroundColor Gray
+    Write-Host "  New-NetFirewallRule -DisplayName 'Connecto TCP' -Direction Inbound -Protocol TCP -LocalPort 8099 -Action Allow" -ForegroundColor Gray
 }
 
 Write-Host ""

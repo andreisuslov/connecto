@@ -16,3 +16,16 @@ $packageArgs = @{
 }
 
 Install-ChocolateyZipPackage @packageArgs
+
+# Configure firewall rules for mDNS discovery
+Write-Host "Configuring firewall rules for mDNS discovery..."
+
+# Remove existing rules if they exist (to avoid duplicates)
+Remove-NetFirewallRule -DisplayName "Connecto mDNS" -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -DisplayName "Connecto TCP" -ErrorAction SilentlyContinue
+
+# Add firewall rules
+New-NetFirewallRule -DisplayName "Connecto mDNS" -Direction Inbound -Protocol UDP -LocalPort 5353 -Action Allow | Out-Null
+New-NetFirewallRule -DisplayName "Connecto TCP" -Direction Inbound -Protocol TCP -LocalPort 8099 -Action Allow | Out-Null
+
+Write-Host "Firewall rules configured."
