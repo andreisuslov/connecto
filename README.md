@@ -7,10 +7,11 @@ Connecto eliminates the hassle of manual SSH key setup. Instead of copying IP ad
 ## Features
 
 - **mDNS Discovery**: Automatically discover devices on your local network
+- **VPN Support**: Save subnets for cross-network discovery
 - **Zero-config Pairing**: Exchange SSH keys with a single command
+- **Auto SSH Config**: `ssh hostname` just works after pairing
 - **Modern Cryptography**: Uses Ed25519 by default (RSA-4096 also supported)
 - **Cross-platform**: Works on Linux, macOS, and Windows
-- **GUI & CLI**: Use the terminal or the graphical interface
 
 ## Quick Start
 
@@ -20,58 +21,29 @@ Connecto eliminates the hassle of manual SSH key setup. Instead of copying IP ad
 connecto listen
 ```
 
-```
-  CONNECTO LISTENER
-
--> Device name: MyDesktop
--> Port: 8099
-
-Local IP addresses:
-  * 192.168.1.55
-
- mDNS service registered - device is now discoverable
-
-Listening for pairing requests on port 8099...
-Press Ctrl+C to stop
-```
-
 ### On the Client Machine (where you want to SSH from)
 
 ```bash
 connecto scan
+connecto pair 0
 ```
 
-```
-  CONNECTO SCANNER
-
--> Scanning for 5 seconds...
-
- Found 1 device(s):
-
-[1] MyDesktop (mydesktop) (192.168.1.55:8099)
-
-To pair with a device, run: connecto pair <number>
-```
+That's it! Now connect with:
 
 ```bash
-connecto pair 1
+ssh mydesktop
 ```
 
-```
-  CONNECTO PAIRING
+## VPN / Cross-Subnet Setup
 
--> Connecting to 192.168.1.55:8099...
--> Using Ed25519 key (modern, secure, fast)
+If devices are on different subnets (e.g., VPN), save the remote subnet once:
 
- Pairing successful!
+```bash
+# One-time setup
+connecto config add-subnet 10.105.225.0/24
 
-Key saved:
-  * Private: /home/user/.ssh/connecto_mydesktop
-  * Public:  /home/user/.ssh/connecto_mydesktop.pub
-
-You can now connect with:
-
-  ssh -i /home/user/.ssh/connecto_mydesktop user@192.168.1.55
+# Now scan finds devices on that subnet automatically
+connecto scan
 ```
 
 ## Installation
@@ -97,11 +69,8 @@ choco install connecto
 ### From Source
 
 ```bash
-# Clone the repository
 git clone https://github.com/andreisuslov/connecto
-cd ssh
-
-# Build and install
+cd connecto
 cargo install --path connecto_cli
 ```
 
@@ -113,7 +82,7 @@ Download pre-built binaries from the [Releases](https://github.com/andreisuslov/
 
 ### `connecto listen`
 
-Start listening for pairing requests.
+Start listening for pairing requests. Exits after one pairing by default.
 
 ```bash
 connecto listen [OPTIONS]
@@ -121,8 +90,8 @@ connecto listen [OPTIONS]
 Options:
   -p, --port <PORT>   Port to listen on [default: 8099]
   -n, --name <NAME>   Custom device name (defaults to hostname)
+  -c, --continuous    Keep listening after first pairing
       --verify        Require verification code
-      --once          Handle only one pairing request and exit
   -v, --verbose       Enable verbose output
 ```
 
@@ -134,19 +103,20 @@ Scan the local network for devices running Connecto.
 connecto scan [OPTIONS]
 
 Options:
-  -t, --timeout <TIMEOUT>  How long to scan in seconds [default: 5]
-  -v, --verbose            Enable verbose output
+  -t, --timeout <TIMEOUT>    Scan duration in seconds [default: 5]
+  -s, --subnet <SUBNET>      Additional subnet to scan (can be repeated)
+  -v, --verbose              Enable verbose output
 ```
 
 ### `connecto pair`
 
-Pair with a discovered device.
+Pair with a discovered device. Automatically adds host to `~/.ssh/config`.
 
 ```bash
 connecto pair <TARGET> [OPTIONS]
 
 Arguments:
-  <TARGET>  Device number from scan results, or IP:port address
+  <TARGET>  Device number from scan (0-indexed), or IP:port
 
 Options:
   -c, --comment <COMMENT>  Custom key comment (defaults to user@hostname)
@@ -154,16 +124,42 @@ Options:
   -v, --verbose            Enable verbose output
 ```
 
+### `connecto hosts`
+
+List all paired hosts.
+
+```bash
+connecto hosts
+```
+
+```
+Paired hosts:
+
+  • mydesktop → user@192.168.1.55
+  • workstation → admin@10.0.0.10
+
+Connect with:
+  → ssh <hostname>
+```
+
+### `connecto config`
+
+Manage saved subnets for VPN/cross-subnet scanning.
+
+```bash
+connecto config add-subnet <CIDR>     # Add subnet (e.g., 10.0.0.0/24)
+connecto config remove-subnet <CIDR>  # Remove subnet
+connecto config list                  # Show saved subnets
+connecto config path                  # Show config file location
+```
+
 ### `connecto keys`
 
 Manage authorized keys on this machine.
 
 ```bash
-connecto keys [COMMAND]
-
-Commands:
-  list    List all authorized keys
-  remove  Remove a key by number or pattern
+connecto keys list    # List all authorized keys
+connecto keys remove  # Remove a key by number or pattern
 ```
 
 ### `connecto keygen`
@@ -174,101 +170,61 @@ Generate a new SSH key pair.
 connecto keygen [OPTIONS]
 
 Options:
-  -n, --name <NAME>        Key name (stored in ~/.ssh/) [default: connecto_key]
+  -n, --name <NAME>        Key name [default: connecto_key]
   -c, --comment <COMMENT>  Key comment
       --rsa                Generate RSA key instead of Ed25519
 ```
 
-## Architecture
+## How It Works
 
-Connecto is built as a Rust workspace with three components:
+### Same Network (mDNS)
 
-```
-connecto/
-├── connecto_core/    # Core library (mDNS, SSH keys, protocol)
-├── connecto_cli/     # CLI application
-└── connecto_gui/     # Tauri GUI application
-```
+1. **Listen**: Target advertises via mDNS on port 8099
+2. **Scan**: Client discovers devices via mDNS
+3. **Pair**: Client sends public key, target adds to `~/.ssh/authorized_keys`
+4. **Done**: Client's `~/.ssh/config` is auto-configured
 
-### connecto_core
+### Different Networks (VPN)
 
-The heart of Connecto, providing:
-
-- **discovery**: mDNS-based device discovery using `mdns-sd`
-- **keys**: SSH key generation and management using `ssh-key`
-- **protocol**: JSON-based handshake protocol over TCP
-
-### connecto_cli
-
-A terminal interface built with:
-
-- `clap` for argument parsing
-- `colored` for terminal colors
-- `indicatif` for progress spinners
-- `dialoguer` for interactive prompts
-
-### connecto_gui
-
-A cross-platform GUI built with Tauri, featuring:
-
-- Device scanning and pairing
-- Key management
-- Modern, dark-themed interface
+1. **Save subnet**: `connecto config add-subnet 10.x.x.0/24`
+2. **Listen**: Target starts listener
+3. **Scan**: Client scans local subnets + saved subnets
+4. **Pair**: Same as above
 
 ## Protocol
 
-Connecto uses a simple JSON-over-TCP protocol for key exchange:
+Connecto uses a simple JSON-over-TCP protocol:
 
 1. **Hello**: Client sends version and device name
 2. **HelloAck**: Server responds with version, name, and optional verification code
 3. **KeyExchange**: Client sends its public key
 4. **KeyAccepted**: Server confirms key installation
-5. **PairingComplete**: Server sends SSH user for connection command
+5. **PairingComplete**: Server sends SSH user for connection
 
-## Security Considerations
+## Security
 
-- Keys are generated locally and never leave the device (only public keys are transmitted)
+- Keys are generated locally; only public keys are transmitted
 - The pairing service only listens when explicitly started
-- Optional verification codes can prevent unauthorized pairing
-- All communication happens over the local network
+- Optional verification codes prevent unauthorized pairing
+- All communication happens over the local/VPN network
 
 ## Building from Source
 
 ### Requirements
 
 - Rust 1.70+
-- For GUI: WebKitGTK development libraries (Linux)
 
 ### Build Commands
 
 ```bash
-# Build everything
+# Build
 cargo build --release
 
 # Run tests
 cargo test --workspace
 
-# Build only CLI
-cargo build -p connecto_cli --release
-
-# Build GUI (requires system dependencies)
-# Uncomment connecto_gui in Cargo.toml first
-cargo build -p connecto_gui --release
-```
-
-### Linux GUI Dependencies
-
-For the GUI on Linux, install:
-
-```bash
-# Ubuntu/Debian
-sudo apt install libwebkit2gtk-4.0-dev libgtk-3-dev libappindicator3-dev
-
-# Fedora
-sudo dnf install webkit2gtk3-devel gtk3-devel libappindicator-gtk3-devel
-
-# Arch
-sudo pacman -S webkit2gtk gtk3 libappindicator-gtk3
+# Install
+cargo install --path connecto_cli
 ```
 
 ## License
