@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 
 use super::{error, info, success};
 
-pub async fn run(port: u16, name: Option<String>, verify: bool, once: bool) -> Result<()> {
+pub async fn run(port: u16, name: Option<String>, verify: bool, continuous: bool) -> Result<()> {
     let device_name = name.unwrap_or_else(get_hostname);
     let key_manager = KeyManager::new()?;
 
@@ -61,8 +61,23 @@ pub async fn run(port: u16, name: Option<String>, verify: bool, once: bool) -> R
     // Create event channel
     let (event_tx, mut event_rx) = mpsc::channel(10);
 
+    // Get local subnets for VPN detection
+    let local_subnets: Vec<String> = addresses
+        .iter()
+        .filter_map(|addr| {
+            if let std::net::IpAddr::V4(ipv4) = addr {
+                let octets = ipv4.octets();
+                Some(format!("{}.{}.{}", octets[0], octets[1], octets[2]))
+            } else {
+                None
+            }
+        })
+        .collect();
+
     // Handle events in a separate task
     let event_handler = tokio::spawn(async move {
+        let mut last_client_ip: Option<String> = None;
+
         while let Some(event) = event_rx.recv().await {
             match event {
                 ServerEvent::Started { address } => {
@@ -70,6 +85,7 @@ pub async fn run(port: u16, name: Option<String>, verify: bool, once: bool) -> R
                 }
                 ServerEvent::ClientConnected { address } => {
                     println!();
+                    last_client_ip = Some(address.ip().to_string());
                     info(&format!(
                         "Connection from {}",
                         address.to_string().yellow()
@@ -98,6 +114,29 @@ pub async fn run(port: u16, name: Option<String>, verify: bool, once: bool) -> R
                         "  {} They can now SSH to this machine.",
                         "→".cyan()
                     );
+
+                    // Check if client is from a different subnet (VPN scenario)
+                    if let Some(ref client_ip) = last_client_ip {
+                        let client_subnet: String = client_ip
+                            .split('.')
+                            .take(3)
+                            .collect::<Vec<_>>()
+                            .join(".");
+
+                        if !local_subnets.iter().any(|s| s == &client_subnet) {
+                            println!();
+                            println!("{}", "VPN/Cross-subnet connection detected!".yellow().bold());
+                            println!(
+                                "  {} Tell {} to save your subnet for future scans:",
+                                "→".cyan(),
+                                device_name.cyan()
+                            );
+                            println!(
+                                "    {}",
+                                format!("connecto config add-subnet {}.0/24", client_subnet).dimmed()
+                            );
+                        }
+                    }
                     println!();
                 }
                 ServerEvent::Error { message } => {
@@ -108,12 +147,9 @@ pub async fn run(port: u16, name: Option<String>, verify: bool, once: bool) -> R
     });
 
     // Run server
-    if once {
-        info("Waiting for a single pairing request...");
-        server.handle_one(event_tx).await?;
-        success("Pairing complete, exiting.");
-    } else {
-        // Run continuously
+    if continuous {
+        // Run continuously until Ctrl+C
+        info("Running in continuous mode (Ctrl+C to stop)...");
         tokio::select! {
             result = server.run(event_tx) => {
                 if let Err(e) = result {
@@ -125,6 +161,9 @@ pub async fn run(port: u16, name: Option<String>, verify: bool, once: bool) -> R
                 info("Shutting down...");
             }
         }
+    } else {
+        // Default: handle one pairing and exit
+        server.handle_one(event_tx).await?;
     }
 
     // Clean up

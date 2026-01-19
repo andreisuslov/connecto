@@ -3,31 +3,44 @@
 use anyhow::Result;
 use colored::Colorize;
 use connecto_core::discovery::{DiscoveredDevice, ServiceBrowser, SubnetScanner, DEFAULT_PORT};
-use dialoguer::Confirm;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
 use std::io::Write;
 use std::time::Duration;
 
 use super::{info, success};
+use crate::config::Config;
 
 /// File to cache discovered devices for the pair command
 const CACHE_FILE: &str = "/tmp/connecto_devices.json";
 
 #[allow(dead_code)]
 pub async fn run(timeout: u64) -> Result<()> {
-    run_with_fallback(timeout, false).await
+    run_with_options(timeout, false, vec![]).await
 }
 
+#[allow(dead_code)]
 pub async fn run_with_fallback(timeout: u64, fallback: bool) -> Result<()> {
+    run_with_options(timeout, fallback, vec![]).await
+}
+
+pub async fn run_with_options(timeout: u64, _fallback: bool, cli_subnets: Vec<String>) -> Result<()> {
     println!();
     println!("{}", "  CONNECTO SCANNER  ".on_bright_cyan().white().bold());
     println!();
 
-    info(&format!("Scanning for {} seconds...", timeout));
+    // Load saved subnets from config
+    let config = Config::load().unwrap_or_default();
+    let mut all_subnets = cli_subnets;
+    for subnet in config.subnets {
+        if !all_subnets.contains(&subnet) {
+            all_subnets.push(subnet);
+        }
+    }
+
+    info("Scanning for devices...");
     println!();
 
-    // Create a spinner
     let spinner = ProgressBar::new_spinner();
     spinner.set_style(
         ProgressStyle::default_spinner()
@@ -35,10 +48,11 @@ pub async fn run_with_fallback(timeout: u64, fallback: bool) -> Result<()> {
             .template("{spinner:.cyan} {msg}")
             .unwrap(),
     );
-    spinner.set_message("Searching for Connecto devices via mDNS...");
+
+    // Try mDNS first
+    spinner.set_message("Searching via mDNS...");
     spinner.enable_steady_tick(Duration::from_millis(80));
 
-    // Scan for devices via mDNS
     let browser = ServiceBrowser::new()?;
     let mut devices = browser
         .scan_for_duration(Duration::from_secs(timeout))
@@ -46,49 +60,47 @@ pub async fn run_with_fallback(timeout: u64, fallback: bool) -> Result<()> {
 
     spinner.finish_and_clear();
 
-    // If mDNS found nothing, try subnet scanning
+    // If mDNS found nothing, try subnet scanning (local + configured subnets)
     if devices.is_empty() {
-        let should_fallback = fallback || {
-            println!("{}", "No devices found via mDNS.".yellow());
-            println!();
-            println!("{}", "This often happens on corporate networks that block multicast.".dimmed());
-            println!();
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_style(
+            ProgressStyle::default_spinner()
+                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+                .template("{spinner:.yellow} {msg}")
+                .unwrap(),
+        );
+        spinner.set_message("Scanning subnets...");
+        spinner.enable_steady_tick(Duration::from_millis(80));
 
-            Confirm::new()
-                .with_prompt("Try scanning the local subnet directly? (slower but works on restricted networks)")
-                .default(true)
-                .interact()
-                .unwrap_or(false)
-        };
+        let scanner = SubnetScanner::new(DEFAULT_PORT, Duration::from_millis(500));
 
-        if should_fallback {
-            println!();
-            let spinner = ProgressBar::new_spinner();
-            spinner.set_style(
-                ProgressStyle::default_spinner()
-                    .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-                    .template("{spinner:.yellow} {msg}")
-                    .unwrap(),
-            );
-            spinner.set_message("Scanning local subnet for Connecto devices...");
-            spinner.enable_steady_tick(Duration::from_millis(80));
+        // Scan local subnets
+        devices = scanner.scan().await;
 
-            let scanner = SubnetScanner::new(DEFAULT_PORT, Duration::from_millis(500));
-            devices = scanner.scan().await;
-
-            spinner.finish_and_clear();
+        // Also scan configured subnets
+        if !all_subnets.is_empty() {
+            let extra = scanner.scan_subnets(&all_subnets).await;
+            for device in extra {
+                if !devices.iter().any(|d| d.addresses == device.addresses) {
+                    devices.push(device);
+                }
+            }
         }
-    }
+
+        spinner.finish_and_clear();
+    };
 
     if devices.is_empty() {
         println!("{}", "No devices found.".yellow());
         println!();
         println!("{}", "Make sure:".dimmed());
         println!("  {} The target device is running 'connecto listen'", "•".dimmed());
-        println!("  {} Both devices are on the same network", "•".dimmed());
         println!("  {} Your firewall allows connections on port 8099", "•".dimmed());
         println!();
-        println!("{}", "Tip: You can pair directly if you know the IP:".dimmed());
+        println!("{}", "If devices are on different subnets (e.g., VPN):".dimmed());
+        println!("  {} connecto config add-subnet 10.x.x.0/24", "→".cyan());
+        println!();
+        println!("{}", "Or pair directly if you know the IP:".dimmed());
         println!("  {} connecto pair <ip>:8099", "→".cyan());
         println!();
         return Ok(());
@@ -127,7 +139,7 @@ pub async fn run_with_fallback(timeout: u64, fallback: bool) -> Result<()> {
 
 fn display_devices(devices: &[DiscoveredDevice]) {
     for (i, device) in devices.iter().enumerate() {
-        let num = format!("[{}]", i + 1).green().bold();
+        let num = format!("[{}]", i).green().bold();
         let name = extract_friendly_name(&device.name);
 
         print!("{} {} ", num, name.cyan().bold());
