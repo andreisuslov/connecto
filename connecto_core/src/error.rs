@@ -20,6 +20,9 @@ pub enum ConnectoError {
     #[error("Handshake error: {0}")]
     Handshake(String),
 
+    #[error("Protocol error: {0}")]
+    Protocol(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

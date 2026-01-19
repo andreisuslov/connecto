@@ -64,6 +64,10 @@ enum Commands {
         /// How long to scan in seconds
         #[arg(short, long, default_value_t = 5)]
         timeout: u64,
+
+        /// Skip mDNS and scan subnet directly (for corporate networks)
+        #[arg(short, long)]
+        fallback: bool,
     },
 
     /// Pair with a discovered device
@@ -134,8 +138,8 @@ async fn main() -> Result<()> {
         Commands::Listen { port, name, verify, once } => {
             commands::listen::run(port, name, verify, once).await
         }
-        Commands::Scan { timeout } => {
-            commands::scan::run(timeout).await
+        Commands::Scan { timeout, fallback } => {
+            commands::scan::run_with_fallback(timeout, fallback).await
         }
         Commands::Pair { target, comment, rsa } => {
             commands::pair::run(target, comment, rsa).await

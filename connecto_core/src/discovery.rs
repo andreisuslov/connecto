@@ -3,14 +3,17 @@
 //! Handles automatic discovery of Connecto instances on the local network
 
 use crate::error::{ConnectoError, Result};
+use crate::protocol::Message;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// The mDNS service type for Connecto
 pub const SERVICE_TYPE: &str = "_connecto._tcp.local.";
@@ -271,6 +274,140 @@ pub fn get_local_addresses() -> Vec<IpAddr> {
     }
 
     addresses
+}
+
+/// Subnet scanner for when mDNS is blocked (corporate networks)
+pub struct SubnetScanner {
+    port: u16,
+    timeout: Duration,
+}
+
+impl SubnetScanner {
+    /// Create a new subnet scanner
+    pub fn new(port: u16, timeout: Duration) -> Self {
+        Self { port, timeout }
+    }
+
+    /// Scan the local /24 subnet for connecto listeners
+    pub async fn scan(&self) -> Vec<DiscoveredDevice> {
+        let local_ips: Vec<Ipv4Addr> = get_local_addresses()
+            .into_iter()
+            .filter_map(|ip| match ip {
+                IpAddr::V4(v4) => Some(v4),
+                _ => None,
+            })
+            .filter(|ip| !ip.is_loopback() && !ip.is_link_local())
+            .collect();
+
+        if local_ips.is_empty() {
+            warn!("No local IPv4 addresses found for subnet scanning");
+            return Vec::new();
+        }
+
+        let mut all_devices = Vec::new();
+
+        for local_ip in local_ips {
+            let octets = local_ip.octets();
+            debug!("Scanning subnet {}.{}.{}.0/24", octets[0], octets[1], octets[2]);
+
+            // Generate all IPs in the /24 subnet (skip .0 and .255)
+            let subnet_ips: Vec<Ipv4Addr> = (1..255)
+                .map(|last| Ipv4Addr::new(octets[0], octets[1], octets[2], last))
+                .filter(|ip| *ip != local_ip) // Skip our own IP
+                .collect();
+
+            // Scan in parallel with limited concurrency
+            let devices = self.scan_ips(subnet_ips).await;
+            all_devices.extend(devices);
+        }
+
+        all_devices
+    }
+
+    /// Scan a list of IPs for connecto listeners
+    async fn scan_ips(&self, ips: Vec<Ipv4Addr>) -> Vec<DiscoveredDevice> {
+        use futures::stream::{self, StreamExt};
+
+        let port = self.port;
+        let timeout = self.timeout;
+
+        // Scan with concurrency limit of 50
+        let results: Vec<Option<DiscoveredDevice>> = stream::iter(ips)
+            .map(|ip| async move {
+                Self::probe_host(ip, port, timeout).await
+            })
+            .buffer_unordered(50)
+            .collect()
+            .await;
+
+        results.into_iter().flatten().collect()
+    }
+
+    /// Probe a single host to check if it's running connecto
+    async fn probe_host(ip: Ipv4Addr, port: u16, timeout: Duration) -> Option<DiscoveredDevice> {
+        let addr = SocketAddr::new(IpAddr::V4(ip), port);
+
+        // Try to connect with timeout
+        let stream = match tokio::time::timeout(timeout, TcpStream::connect(addr)).await {
+            Ok(Ok(stream)) => stream,
+            _ => return None,
+        };
+
+        // Try to get device info via protocol handshake
+        match Self::identify_device(stream, ip, port).await {
+            Ok(device) => {
+                info!("Found connecto device at {}: {}", addr, device.name);
+                Some(device)
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// Send a Hello message to identify the device
+    async fn identify_device(
+        mut stream: TcpStream,
+        ip: Ipv4Addr,
+        port: u16,
+    ) -> Result<DiscoveredDevice> {
+        let (reader, mut writer) = stream.split();
+        let mut reader = BufReader::new(reader);
+
+        // Send Hello message
+        let hello = Message::Hello {
+            version: 1,
+            device_name: format!("scanner-{}", std::process::id()),
+        };
+        writer.write_all(hello.to_json()?.as_bytes()).await
+            .map_err(|e| ConnectoError::Network(e.to_string()))?;
+        writer.write_all(b"\n").await
+            .map_err(|e| ConnectoError::Network(e.to_string()))?;
+
+        // Read HelloAck response
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut line))
+            .await
+            .map_err(|_| ConnectoError::Timeout("Timed out waiting for response".to_string()))?
+            .map_err(|e| ConnectoError::Network(e.to_string()))?;
+
+        let response: Message = serde_json::from_str(&line)
+            .map_err(|e| ConnectoError::Protocol(format!("Invalid response: {}", e)))?;
+
+        match response {
+            Message::HelloAck { device_name, .. } => {
+                Ok(DiscoveredDevice {
+                    name: device_name.clone(),
+                    hostname: format!("{}.local.", device_name.to_lowercase().replace(' ', "-")),
+                    addresses: vec![IpAddr::V4(ip)],
+                    port,
+                    instance_name: format!("{}._connecto._tcp.local.", device_name),
+                })
+            }
+            Message::Error { message, .. } => {
+                Err(ConnectoError::Protocol(message))
+            }
+            _ => Err(ConnectoError::Protocol("Unexpected response".to_string())),
+        }
+    }
 }
 
 #[cfg(test)]
