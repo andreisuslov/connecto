@@ -10,7 +10,7 @@ members = [
 # To build, uncomment the line above and run: cargo build -p connecto_gui
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 authors = ["Connecto Team"]
