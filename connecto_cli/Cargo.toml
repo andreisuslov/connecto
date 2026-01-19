@@ -13,6 +13,7 @@ path = "src/main.rs"
 connecto_core = { path = "../connecto_core" }
 tokio = { workspace = true }
 clap = { workspace = true }
+clap_complete = "4.4"
 colored = { workspace = true }
 dialoguer = { workspace = true }
 indicatif = { workspace = true }
