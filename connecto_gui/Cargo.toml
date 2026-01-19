@@ -1,0 +1,30 @@
+[package]
+name = "connecto_gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "GUI interface for Connecto using Tauri"
+
+[lib]
+name = "connecto_gui_lib"
+path = "src-tauri/src/lib.rs"
+
+[[bin]]
+name = "connecto-gui"
+path = "src-tauri/src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
+
+[dependencies]
+connecto_core = { path = "../connecto_core" }
+tauri = { version = "1.6", features = ["shell-open"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
