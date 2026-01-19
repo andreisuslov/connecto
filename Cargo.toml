@@ -3,11 +3,8 @@ resolver = "2"
 members = [
     "connecto_core",
     "connecto_cli",
-    # "connecto_gui",  # Requires WebKitGTK system libraries
+    # "connecto_gui",  # Needs Tauri update
 ]
-
-# Note: connecto_gui can be built on systems with WebKitGTK installed
-# To build, uncomment the line above and run: cargo build -p connecto_gui
 
 [workspace.package]
 version = "0.2.0"

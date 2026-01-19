@@ -114,6 +114,40 @@ enum Commands {
 
     /// List paired hosts (from ~/.ssh/config)
     Hosts,
+
+    /// Remove a paired host and delete its keys
+    Unpair {
+        /// Host name to unpair
+        host: String,
+    },
+
+    /// Test SSH connection to a paired host
+    Test {
+        /// Host name to test
+        host: String,
+    },
+
+    /// Update IP address for a paired host
+    UpdateIp {
+        /// Host name to update
+        host: String,
+
+        /// New IP address
+        ip: String,
+    },
+
+    /// Export paired hosts configuration
+    Export {
+        /// Output file (default: stdout)
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+
+    /// Import paired hosts configuration
+    Import {
+        /// Input file
+        file: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -183,6 +217,21 @@ async fn main() -> Result<()> {
         }
         Commands::Hosts => {
             run_hosts()
+        }
+        Commands::Unpair { host } => {
+            run_unpair(&host)
+        }
+        Commands::Test { host } => {
+            run_test(&host)
+        }
+        Commands::UpdateIp { host, ip } => {
+            run_update_ip(&host, &ip)
+        }
+        Commands::Export { output } => {
+            run_export(output.as_deref())
+        }
+        Commands::Import { file } => {
+            run_import(&file)
         }
     }
 }
@@ -312,6 +361,368 @@ fn run_config(action: ConfigAction) -> Result<()> {
             println!("{}", path.display());
         }
     }
+    Ok(())
+}
+
+/// Remove a paired host from SSH config and delete its keys
+fn run_unpair(host: &str) -> Result<()> {
+    use colored::Colorize;
+    use std::fs;
+
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| anyhow::anyhow!("HOME/USERPROFILE not set"))?;
+    let ssh_dir = std::path::PathBuf::from(&home).join(".ssh");
+    let config_path = ssh_dir.join("config");
+
+    if !config_path.exists() {
+        println!("{} No SSH config file found.", "✗".red());
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&config_path)?;
+    let mut new_lines: Vec<&str> = Vec::new();
+    let mut skip_block = false;
+    let mut found = false;
+    let mut identity_file: Option<String> = None;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed == "# Added by connecto" {
+            // Check next line for our host
+            skip_block = false;
+            new_lines.push(line);
+            continue;
+        }
+
+        if trimmed.starts_with("Host ") && !trimmed.contains('*') {
+            let host_name = trimmed.strip_prefix("Host ").unwrap().trim();
+            if host_name == host {
+                skip_block = true;
+                found = true;
+                // Remove the "# Added by connecto" line we just added
+                if new_lines.last().map(|l| l.trim()) == Some("# Added by connecto") {
+                    new_lines.pop();
+                }
+                continue;
+            }
+        }
+
+        if skip_block {
+            if trimmed.starts_with("IdentityFile ") {
+                identity_file = Some(trimmed.strip_prefix("IdentityFile ").unwrap().trim().to_string());
+            }
+            if trimmed.is_empty() || (trimmed.starts_with("Host ") && !trimmed.starts_with("HostName")) {
+                skip_block = false;
+                if !trimmed.is_empty() {
+                    new_lines.push(line);
+                }
+            }
+            continue;
+        }
+
+        new_lines.push(line);
+    }
+
+    if !found {
+        println!("{} Host '{}' not found in SSH config.", "✗".red(), host);
+        return Ok(());
+    }
+
+    // Write updated config
+    fs::write(&config_path, new_lines.join("\n") + "\n")?;
+    println!("{} Removed '{}' from SSH config.", "✓".green(), host.cyan());
+
+    // Delete key files
+    if let Some(key_path) = identity_file {
+        let key_path = std::path::PathBuf::from(&key_path);
+        let pub_path = key_path.with_extension("pub");
+
+        if key_path.exists() {
+            fs::remove_file(&key_path)?;
+            println!("{} Deleted private key: {}", "✓".green(), key_path.display().to_string().dimmed());
+        }
+        if pub_path.exists() {
+            fs::remove_file(&pub_path)?;
+            println!("{} Deleted public key: {}", "✓".green(), pub_path.display().to_string().dimmed());
+        }
+    }
+
+    Ok(())
+}
+
+/// Test SSH connection to a paired host
+fn run_test(host: &str) -> Result<()> {
+    use colored::Colorize;
+    use std::process::Command;
+
+    println!("{} Testing connection to {}...", "→".cyan(), host.cyan().bold());
+
+    let output = Command::new("ssh")
+        .args(["-o", "ConnectTimeout=5", "-o", "BatchMode=yes", host, "echo", "connecto-ok"])
+        .output();
+
+    match output {
+        Ok(result) => {
+            if result.status.success() {
+                let stdout = String::from_utf8_lossy(&result.stdout);
+                if stdout.trim() == "connecto-ok" {
+                    println!("{} Connection successful!", "✓".green());
+                    Ok(())
+                } else {
+                    println!("{} Connection established but unexpected response.", "⚠".yellow());
+                    Ok(())
+                }
+            } else {
+                let stderr = String::from_utf8_lossy(&result.stderr);
+                println!("{} Connection failed.", "✗".red());
+                if !stderr.is_empty() {
+                    println!("{}", stderr.dimmed());
+                }
+                println!();
+                println!("{}", "Troubleshooting:".bold());
+                println!("  {} Check if the host is online", "•".dimmed());
+                println!("  {} Verify the IP is correct: {}", "•".dimmed(), "connecto hosts".cyan());
+                println!("  {} Update IP if changed: {}", "•".dimmed(), format!("connecto update-ip {} <new-ip>", host).cyan());
+                Ok(())
+            }
+        }
+        Err(e) => {
+            println!("{} Failed to run ssh: {}", "✗".red(), e);
+            Ok(())
+        }
+    }
+}
+
+/// Update IP address for a paired host
+fn run_update_ip(host: &str, new_ip: &str) -> Result<()> {
+    use colored::Colorize;
+    use std::fs;
+
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| anyhow::anyhow!("HOME/USERPROFILE not set"))?;
+    let config_path = std::path::PathBuf::from(&home).join(".ssh").join("config");
+
+    if !config_path.exists() {
+        println!("{} No SSH config file found.", "✗".red());
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&config_path)?;
+    let mut new_content = String::new();
+    let mut in_target_block = false;
+    let mut found = false;
+    let mut old_ip = String::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("Host ") && !trimmed.contains('*') {
+            let host_name = trimmed.strip_prefix("Host ").unwrap().trim();
+            in_target_block = host_name == host;
+        }
+
+        if in_target_block && trimmed.starts_with("HostName ") {
+            old_ip = trimmed.strip_prefix("HostName ").unwrap().trim().to_string();
+            new_content.push_str(&format!("    HostName {}\n", new_ip));
+            found = true;
+            continue;
+        }
+
+        new_content.push_str(line);
+        new_content.push('\n');
+    }
+
+    if !found {
+        println!("{} Host '{}' not found in SSH config.", "✗".red(), host);
+        return Ok(());
+    }
+
+    fs::write(&config_path, new_content)?;
+    println!("{} Updated '{}' IP: {} → {}", "✓".green(), host.cyan(), old_ip.dimmed(), new_ip.cyan().bold());
+
+    Ok(())
+}
+
+/// Export paired hosts configuration
+fn run_export(output: Option<&str>) -> Result<()> {
+    use colored::Colorize;
+    use serde::{Deserialize, Serialize};
+    use std::fs;
+
+    #[derive(Serialize, Deserialize)]
+    struct ExportedHost {
+        host: String,
+        hostname: String,
+        user: String,
+        identity_file: String,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct ExportData {
+        version: u32,
+        hosts: Vec<ExportedHost>,
+        subnets: Vec<String>,
+    }
+
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| anyhow::anyhow!("HOME/USERPROFILE not set"))?;
+    let config_path = std::path::PathBuf::from(&home).join(".ssh").join("config");
+
+    let mut hosts = Vec::new();
+
+    if config_path.exists() {
+        let content = fs::read_to_string(&config_path)?;
+        let mut in_connecto_block = false;
+        let mut current = ExportedHost {
+            host: String::new(),
+            hostname: String::new(),
+            user: String::new(),
+            identity_file: String::new(),
+        };
+
+        for line in content.lines() {
+            let trimmed = line.trim();
+
+            if trimmed == "# Added by connecto" {
+                in_connecto_block = true;
+                continue;
+            }
+
+            if in_connecto_block {
+                if trimmed.starts_with("Host ") && !trimmed.contains('*') {
+                    if !current.host.is_empty() {
+                        hosts.push(current);
+                        current = ExportedHost {
+                            host: String::new(),
+                            hostname: String::new(),
+                            user: String::new(),
+                            identity_file: String::new(),
+                        };
+                    }
+                    current.host = trimmed.strip_prefix("Host ").unwrap().to_string();
+                } else if trimmed.starts_with("HostName ") {
+                    current.hostname = trimmed.strip_prefix("HostName ").unwrap().to_string();
+                } else if trimmed.starts_with("User ") {
+                    current.user = trimmed.strip_prefix("User ").unwrap().to_string();
+                } else if trimmed.starts_with("IdentityFile ") {
+                    current.identity_file = trimmed.strip_prefix("IdentityFile ").unwrap().to_string();
+                    hosts.push(current);
+                    current = ExportedHost {
+                        host: String::new(),
+                        hostname: String::new(),
+                        user: String::new(),
+                        identity_file: String::new(),
+                    };
+                    in_connecto_block = false;
+                }
+            }
+        }
+    }
+
+    let cfg = config::Config::load().unwrap_or_default();
+
+    let export_data = ExportData {
+        version: 1,
+        hosts,
+        subnets: cfg.subnets,
+    };
+
+    let json = serde_json::to_string_pretty(&export_data)?;
+
+    if let Some(path) = output {
+        fs::write(path, &json)?;
+        println!("{} Exported {} host(s) to {}", "✓".green(), export_data.hosts.len(), path.cyan());
+    } else {
+        println!("{}", json);
+    }
+
+    Ok(())
+}
+
+/// Import paired hosts configuration
+fn run_import(file: &str) -> Result<()> {
+    use colored::Colorize;
+    use serde::{Deserialize, Serialize};
+    use std::fs;
+
+    #[derive(Serialize, Deserialize)]
+    struct ExportedHost {
+        host: String,
+        hostname: String,
+        user: String,
+        identity_file: String,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct ExportData {
+        version: u32,
+        hosts: Vec<ExportedHost>,
+        subnets: Vec<String>,
+    }
+
+    let content = fs::read_to_string(file)?;
+    let data: ExportData = serde_json::from_str(&content)?;
+
+    if data.version != 1 {
+        return Err(anyhow::anyhow!("Unsupported export version: {}", data.version));
+    }
+
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| anyhow::anyhow!("HOME/USERPROFILE not set"))?;
+    let ssh_dir = std::path::PathBuf::from(&home).join(".ssh");
+    let config_path = ssh_dir.join("config");
+
+    // Create .ssh directory if needed
+    if !ssh_dir.exists() {
+        fs::create_dir_all(&ssh_dir)?;
+    }
+
+    // Read existing config
+    let mut existing = String::new();
+    if config_path.exists() {
+        existing = fs::read_to_string(&config_path)?;
+    }
+
+    // Add hosts that don't already exist
+    let mut added = 0;
+    for host in &data.hosts {
+        let host_pattern = format!("Host {}", host.host);
+        if !existing.contains(&host_pattern) {
+            let entry = format!(
+                "\n# Added by connecto\nHost {}\n    HostName {}\n    User {}\n    IdentityFile {}\n",
+                host.host, host.hostname, host.user, host.identity_file
+            );
+            existing.push_str(&entry);
+            added += 1;
+        }
+    }
+
+    if added > 0 {
+        fs::write(&config_path, &existing)?;
+        println!("{} Imported {} host(s) to SSH config.", "✓".green(), added);
+    } else {
+        println!("{} All hosts already exist in SSH config.", "→".yellow());
+    }
+
+    // Import subnets
+    let mut cfg = config::Config::load().unwrap_or_default();
+    let mut subnet_added = 0;
+    for subnet in &data.subnets {
+        if cfg.add_subnet(subnet) {
+            subnet_added += 1;
+        }
+    }
+
+    if subnet_added > 0 {
+        cfg.save()?;
+        println!("{} Imported {} subnet(s) to config.", "✓".green(), subnet_added);
+    }
+
     Ok(())
 }
 
