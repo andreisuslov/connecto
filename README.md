@@ -85,7 +85,7 @@ brew install andreisuslov/connecto/connecto
 ### Windows (PowerShell)
 
 ```powershell
-irm https://raw.githubusercontent.com/andreisuslov/ssh/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/andreisuslov/connecto/main/install.ps1 | iex
 ```
 
 ### Windows (Chocolatey)
@@ -98,7 +98,7 @@ choco install connecto
 
 ```bash
 # Clone the repository
-git clone https://github.com/andreisuslov/ssh
+git clone https://github.com/andreisuslov/connecto
 cd ssh
 
 # Build and install
@@ -107,7 +107,7 @@ cargo install --path connecto_cli
 
 ### Binary Releases
 
-Download pre-built binaries from the [Releases](https://github.com/andreisuslov/ssh/releases) page.
+Download pre-built binaries from the [Releases](https://github.com/andreisuslov/connecto/releases) page.
 
 ## CLI Commands
 

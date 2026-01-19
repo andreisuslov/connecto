@@ -1,10 +1,10 @@
 #!/usr/bin/env pwsh
 # Connecto installer for Windows
-# Usage: irm https://raw.githubusercontent.com/andreisuslov/ssh/main/install.ps1 | iex
+# Usage: irm https://raw.githubusercontent.com/andreisuslov/connecto/main/install.ps1 | iex
 
 $ErrorActionPreference = "Stop"
 
-$repo = "andreisuslov/ssh"
+$repo = "andreisuslov/connecto"
 $installDir = "$env:LOCALAPPDATA\connecto"
 
 Write-Host "Installing Connecto..." -ForegroundColor Cyan
