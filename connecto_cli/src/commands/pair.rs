@@ -35,7 +35,9 @@ pub async fn run(target: String, comment: Option<String>, rsa: bool) -> Result<(
     };
 
     let key_comment = comment.unwrap_or_else(|| {
-        let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+        let user = std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_else(|_| "user".to_string());
         let hostname = get_hostname();
         format!("{}@{}", user, hostname)
     });
