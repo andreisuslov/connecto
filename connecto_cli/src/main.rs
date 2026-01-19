@@ -9,7 +9,8 @@ mod commands;
 mod config;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 use tracing_subscriber::EnvFilter;
 
 /// Connecto - AirDrop-like SSH key pairing for your terminal
@@ -148,6 +149,13 @@ enum Commands {
         /// Input file
         file: String,
     },
+
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: Shell,
+    },
 }
 
 #[derive(Subcommand)]
@@ -232,6 +240,10 @@ async fn main() -> Result<()> {
         }
         Commands::Import { file } => {
             run_import(&file)
+        }
+        Commands::Completions { shell } => {
+            generate(shell, &mut Cli::command(), "connecto", &mut std::io::stdout());
+            Ok(())
         }
     }
 }
