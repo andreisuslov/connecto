@@ -282,8 +282,10 @@ async fn handle_client(
             };
             writer.write_all(accepted.to_json()?.as_bytes()).await?;
 
-            // Get current user
-            let ssh_user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
+            // Get current user (USER on Unix, USERNAME on Windows)
+            let ssh_user = std::env::var("USER")
+                .or_else(|_| std::env::var("USERNAME"))
+                .unwrap_or_else(|_| "unknown".to_string());
 
             // Send PairingComplete
             let complete = Message::PairingComplete { ssh_user };
