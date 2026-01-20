@@ -17,7 +17,6 @@ export default function App() {
             <div className="p-2 bg-gradient-to-br from-blue-500 to-purple-600 rounded-xl">
               <Radio className="size-5 text-white" />
             </div>
-            <h1 className="text-xl font-bold">Connecto</h1>
           </div>
         </div>
       </div>

@@ -8,7 +8,7 @@
   },
   "package": {
     "productName": "Connecto",
-    "version": "0.2.0"
+    "version": "0.2.1"
   },
   "tauri": {
     "allowlist": {
@@ -23,11 +23,10 @@
       "targets": ["dmg", "app"],
       "identifier": "com.connecto.app",
       "icon": [
-        "icons/32x32.png",
-        "icons/128x128.png",
-        "icons/128x128@2x.png",
-        "icons/icon.icns",
-        "icons/icon.ico"
+        "icons/web/icon-192.png",
+        "icons/web/icon-512.png",
+        "icons/macos/AppIcon.icns",
+        "icons/web/favicon.ico"
       ],
       "macOS": {
         "minimumSystemVersion": "10.13"
