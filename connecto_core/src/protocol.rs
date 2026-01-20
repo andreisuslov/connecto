@@ -20,10 +20,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 #[serde(tag = "type")]
 pub enum Message {
     /// Initial hello from client
-    Hello {
-        version: u32,
-        device_name: String,
-    },
+    Hello { version: u32, device_name: String },
 
     /// Server acknowledges hello
     HelloAck {
@@ -33,26 +30,16 @@ pub enum Message {
     },
 
     /// Client sends its public key
-    KeyExchange {
-        public_key: String,
-        comment: String,
-    },
+    KeyExchange { public_key: String, comment: String },
 
     /// Server acknowledges key received and installed
-    KeyAccepted {
-        message: String,
-    },
+    KeyAccepted { message: String },
 
     /// Error occurred
-    Error {
-        code: u32,
-        message: String,
-    },
+    Error { code: u32, message: String },
 
     /// Pairing complete
-    PairingComplete {
-        ssh_user: String,
-    },
+    PairingComplete { ssh_user: String },
 }
 
 impl Message {
@@ -71,12 +58,25 @@ impl Message {
 /// Events emitted by the handshake server
 #[derive(Debug, Clone)]
 pub enum ServerEvent {
-    Started { address: SocketAddr },
-    ClientConnected { address: SocketAddr },
-    PairingRequest { device_name: String, address: SocketAddr },
-    KeyReceived { comment: String },
-    PairingComplete { device_name: String },
-    Error { message: String },
+    Started {
+        address: SocketAddr,
+    },
+    ClientConnected {
+        address: SocketAddr,
+    },
+    PairingRequest {
+        device_name: String,
+        address: SocketAddr,
+    },
+    KeyReceived {
+        comment: String,
+    },
+    PairingComplete {
+        device_name: String,
+    },
+    Error {
+        message: String,
+    },
 }
 
 /// Handshake server that listens for pairing requests
@@ -222,7 +222,9 @@ async fn handle_client(
                     ),
                 };
                 writer.write_all(error_msg.to_json()?.as_bytes()).await?;
-                return Err(ConnectoError::Handshake("Protocol version mismatch".to_string()));
+                return Err(ConnectoError::Handshake(
+                    "Protocol version mismatch".to_string(),
+                ));
             }
             client_name
         }
@@ -264,7 +266,10 @@ async fn handle_client(
     let key_exchange = Message::from_json(&line)?;
 
     match key_exchange {
-        Message::KeyExchange { public_key, comment } => {
+        Message::KeyExchange {
+            public_key,
+            comment,
+        } => {
             debug!("Received public key with comment: {}", comment);
 
             let _ = event_tx
@@ -384,9 +389,7 @@ impl HandshakeClient {
                 return Err(ConnectoError::Handshake(message));
             }
             _ => {
-                return Err(ConnectoError::Handshake(
-                    "Expected KeyAccepted".to_string(),
-                ));
+                return Err(ConnectoError::Handshake("Expected KeyAccepted".to_string()));
             }
         }
 
@@ -619,9 +622,7 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel(10);
 
         // Run server in background
-        let server_handle = tokio::spawn(async move {
-            server.handle_one(event_tx).await
-        });
+        let server_handle = tokio::spawn(async move { server.handle_one(event_tx).await });
 
         // Give server time to start
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

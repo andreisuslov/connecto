@@ -205,44 +205,36 @@ async fn main() -> Result<()> {
         .init();
 
     match cli.command {
-        Commands::Listen { port, name, verify, continuous } => {
-            commands::listen::run(port, name, verify, continuous).await
-        }
+        Commands::Listen {
+            port,
+            name,
+            verify,
+            continuous,
+        } => commands::listen::run(port, name, verify, continuous).await,
         Commands::Scan { timeout, subnet } => {
             commands::scan::run_with_options(timeout, false, subnet).await
         }
-        Commands::Pair { target, comment, rsa } => {
-            commands::pair::run(target, comment, rsa).await
-        }
-        Commands::Keys { action } => {
-            commands::keys::run(action).await
-        }
-        Commands::Keygen { name, comment, rsa } => {
-            commands::keygen::run(name, comment, rsa).await
-        }
-        Commands::Config { action } => {
-            run_config(action)
-        }
-        Commands::Hosts => {
-            run_hosts()
-        }
-        Commands::Unpair { host } => {
-            run_unpair(&host)
-        }
-        Commands::Test { host } => {
-            run_test(&host)
-        }
-        Commands::UpdateIp { host, ip } => {
-            run_update_ip(&host, &ip)
-        }
-        Commands::Export { output } => {
-            run_export(output.as_deref())
-        }
-        Commands::Import { file } => {
-            run_import(&file)
-        }
+        Commands::Pair {
+            target,
+            comment,
+            rsa,
+        } => commands::pair::run(target, comment, rsa).await,
+        Commands::Keys { action } => commands::keys::run(action).await,
+        Commands::Keygen { name, comment, rsa } => commands::keygen::run(name, comment, rsa).await,
+        Commands::Config { action } => run_config(action),
+        Commands::Hosts => run_hosts(),
+        Commands::Unpair { host } => run_unpair(&host),
+        Commands::Test { host } => run_test(&host),
+        Commands::UpdateIp { host, ip } => run_update_ip(&host, &ip),
+        Commands::Export { output } => run_export(output.as_deref()),
+        Commands::Import { file } => run_import(&file),
         Commands::Completions { shell } => {
-            generate(shell, &mut Cli::command(), "connecto", &mut std::io::stdout());
+            generate(
+                shell,
+                &mut Cli::command(),
+                "connecto",
+                &mut std::io::stdout(),
+            );
             Ok(())
         }
     }
@@ -282,7 +274,11 @@ fn run_hosts() -> Result<()> {
         if in_connecto_block {
             if trimmed.starts_with("Host ") && !trimmed.contains('*') {
                 // Save previous host if any
-                if let (Some(h), Some(hn), Some(u)) = (current_host.take(), current_hostname.take(), current_user.take()) {
+                if let (Some(h), Some(hn), Some(u)) = (
+                    current_host.take(),
+                    current_hostname.take(),
+                    current_user.take(),
+                ) {
                     connecto_hosts.push((h, hn, u));
                 }
                 current_host = Some(trimmed.strip_prefix("Host ").unwrap().to_string());
@@ -292,7 +288,11 @@ fn run_hosts() -> Result<()> {
                 current_user = Some(trimmed.strip_prefix("User ").unwrap().to_string());
             } else if trimmed.starts_with("IdentityFile ") {
                 // End of this host block
-                if let (Some(h), Some(hn), Some(u)) = (current_host.take(), current_hostname.take(), current_user.take()) {
+                if let (Some(h), Some(hn), Some(u)) = (
+                    current_host.take(),
+                    current_hostname.take(),
+                    current_user.take(),
+                ) {
                     connecto_hosts.push((h, hn, u));
                 }
                 in_connecto_block = false;
@@ -310,7 +310,10 @@ fn run_hosts() -> Result<()> {
     if connecto_hosts.is_empty() {
         println!("{}", "No paired hosts found.".dimmed());
         println!();
-        println!("Pair with a device using: {}", "connecto scan && connecto pair 0".cyan());
+        println!(
+            "Pair with a device using: {}",
+            "connecto scan && connecto pair 0".cyan()
+        );
         return Ok(());
     }
 
@@ -360,7 +363,10 @@ fn run_config(action: ConfigAction) -> Result<()> {
             if cfg.subnets.is_empty() {
                 println!("{}", "No subnets configured.".dimmed());
                 println!();
-                println!("Add subnets to scan with: {}", "connecto config add-subnet <cidr>".cyan());
+                println!(
+                    "Add subnets to scan with: {}",
+                    "connecto config add-subnet <cidr>".cyan()
+                );
             } else {
                 println!("{}", "Configured subnets:".bold());
                 for subnet in &cfg.subnets {
@@ -423,9 +429,17 @@ fn run_unpair(host: &str) -> Result<()> {
 
         if skip_block {
             if trimmed.starts_with("IdentityFile ") {
-                identity_file = Some(trimmed.strip_prefix("IdentityFile ").unwrap().trim().to_string());
+                identity_file = Some(
+                    trimmed
+                        .strip_prefix("IdentityFile ")
+                        .unwrap()
+                        .trim()
+                        .to_string(),
+                );
             }
-            if trimmed.is_empty() || (trimmed.starts_with("Host ") && !trimmed.starts_with("HostName")) {
+            if trimmed.is_empty()
+                || (trimmed.starts_with("Host ") && !trimmed.starts_with("HostName"))
+            {
                 skip_block = false;
                 if !trimmed.is_empty() {
                     new_lines.push(line);
@@ -453,11 +467,19 @@ fn run_unpair(host: &str) -> Result<()> {
 
         if key_path.exists() {
             fs::remove_file(&key_path)?;
-            println!("{} Deleted private key: {}", "✓".green(), key_path.display().to_string().dimmed());
+            println!(
+                "{} Deleted private key: {}",
+                "✓".green(),
+                key_path.display().to_string().dimmed()
+            );
         }
         if pub_path.exists() {
             fs::remove_file(&pub_path)?;
-            println!("{} Deleted public key: {}", "✓".green(), pub_path.display().to_string().dimmed());
+            println!(
+                "{} Deleted public key: {}",
+                "✓".green(),
+                pub_path.display().to_string().dimmed()
+            );
         }
     }
 
@@ -469,10 +491,22 @@ fn run_test(host: &str) -> Result<()> {
     use colored::Colorize;
     use std::process::Command;
 
-    println!("{} Testing connection to {}...", "→".cyan(), host.cyan().bold());
+    println!(
+        "{} Testing connection to {}...",
+        "→".cyan(),
+        host.cyan().bold()
+    );
 
     let output = Command::new("ssh")
-        .args(["-o", "ConnectTimeout=5", "-o", "BatchMode=yes", host, "echo", "connecto-ok"])
+        .args([
+            "-o",
+            "ConnectTimeout=5",
+            "-o",
+            "BatchMode=yes",
+            host,
+            "echo",
+            "connecto-ok",
+        ])
         .output();
 
     match output {
@@ -483,7 +517,10 @@ fn run_test(host: &str) -> Result<()> {
                     println!("{} Connection successful!", "✓".green());
                     Ok(())
                 } else {
-                    println!("{} Connection established but unexpected response.", "⚠".yellow());
+                    println!(
+                        "{} Connection established but unexpected response.",
+                        "⚠".yellow()
+                    );
                     Ok(())
                 }
             } else {
@@ -495,8 +532,16 @@ fn run_test(host: &str) -> Result<()> {
                 println!();
                 println!("{}", "Troubleshooting:".bold());
                 println!("  {} Check if the host is online", "•".dimmed());
-                println!("  {} Verify the IP is correct: {}", "•".dimmed(), "connecto hosts".cyan());
-                println!("  {} Update IP if changed: {}", "•".dimmed(), format!("connecto update-ip {} <new-ip>", host).cyan());
+                println!(
+                    "  {} Verify the IP is correct: {}",
+                    "•".dimmed(),
+                    "connecto hosts".cyan()
+                );
+                println!(
+                    "  {} Update IP if changed: {}",
+                    "•".dimmed(),
+                    format!("connecto update-ip {} <new-ip>", host).cyan()
+                );
                 Ok(())
             }
         }
@@ -537,7 +582,11 @@ fn run_update_ip(host: &str, new_ip: &str) -> Result<()> {
         }
 
         if in_target_block && trimmed.starts_with("HostName ") {
-            old_ip = trimmed.strip_prefix("HostName ").unwrap().trim().to_string();
+            old_ip = trimmed
+                .strip_prefix("HostName ")
+                .unwrap()
+                .trim()
+                .to_string();
             new_content.push_str(&format!("    HostName {}\n", new_ip));
             found = true;
             continue;
@@ -553,7 +602,13 @@ fn run_update_ip(host: &str, new_ip: &str) -> Result<()> {
     }
 
     fs::write(&config_path, new_content)?;
-    println!("{} Updated '{}' IP: {} → {}", "✓".green(), host.cyan(), old_ip.dimmed(), new_ip.cyan().bold());
+    println!(
+        "{} Updated '{}' IP: {} → {}",
+        "✓".green(),
+        host.cyan(),
+        old_ip.dimmed(),
+        new_ip.cyan().bold()
+    );
 
     Ok(())
 }
@@ -621,7 +676,8 @@ fn run_export(output: Option<&str>) -> Result<()> {
                 } else if trimmed.starts_with("User ") {
                     current.user = trimmed.strip_prefix("User ").unwrap().to_string();
                 } else if trimmed.starts_with("IdentityFile ") {
-                    current.identity_file = trimmed.strip_prefix("IdentityFile ").unwrap().to_string();
+                    current.identity_file =
+                        trimmed.strip_prefix("IdentityFile ").unwrap().to_string();
                     hosts.push(current);
                     current = ExportedHost {
                         host: String::new(),
@@ -647,7 +703,12 @@ fn run_export(output: Option<&str>) -> Result<()> {
 
     if let Some(path) = output {
         fs::write(path, &json)?;
-        println!("{} Exported {} host(s) to {}", "✓".green(), export_data.hosts.len(), path.cyan());
+        println!(
+            "{} Exported {} host(s) to {}",
+            "✓".green(),
+            export_data.hosts.len(),
+            path.cyan()
+        );
     } else {
         println!("{}", json);
     }
@@ -680,7 +741,10 @@ fn run_import(file: &str) -> Result<()> {
     let data: ExportData = serde_json::from_str(&content)?;
 
     if data.version != 1 {
-        return Err(anyhow::anyhow!("Unsupported export version: {}", data.version));
+        return Err(anyhow::anyhow!(
+            "Unsupported export version: {}",
+            data.version
+        ));
     }
 
     let home = std::env::var("HOME")
@@ -732,7 +796,11 @@ fn run_import(file: &str) -> Result<()> {
 
     if subnet_added > 0 {
         cfg.save()?;
-        println!("{} Imported {} subnet(s) to config.", "✓".green(), subnet_added);
+        println!(
+            "{} Imported {} subnet(s) to config.",
+            "✓".green(),
+            subnet_added
+        );
     }
 
     Ok(())
@@ -752,7 +820,12 @@ mod tests {
     fn test_listen_defaults() {
         let cli = Cli::try_parse_from(["connecto", "listen"]).unwrap();
         match cli.command {
-            Commands::Listen { port, name, verify, continuous } => {
+            Commands::Listen {
+                port,
+                name,
+                verify,
+                continuous,
+            } => {
                 assert_eq!(port, connecto_core::DEFAULT_PORT);
                 assert!(name.is_none());
                 assert!(!verify);
@@ -789,10 +862,14 @@ mod tests {
     #[test]
     fn test_scan_with_multiple_subnets() {
         let cli = Cli::try_parse_from([
-            "connecto", "scan",
-            "--subnet", "10.0.0.0/24",
-            "--subnet", "192.168.1.0/24"
-        ]).unwrap();
+            "connecto",
+            "scan",
+            "--subnet",
+            "10.0.0.0/24",
+            "--subnet",
+            "192.168.1.0/24",
+        ])
+        .unwrap();
         match cli.command {
             Commands::Scan { subnet, .. } => {
                 assert_eq!(subnet.len(), 2);
@@ -807,7 +884,11 @@ mod tests {
     fn test_pair_target() {
         let cli = Cli::try_parse_from(["connecto", "pair", "1"]).unwrap();
         match cli.command {
-            Commands::Pair { target, comment, rsa } => {
+            Commands::Pair {
+                target,
+                comment,
+                rsa,
+            } => {
                 assert_eq!(target, "1");
                 assert!(comment.is_none());
                 assert!(!rsa);

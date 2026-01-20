@@ -24,7 +24,11 @@ pub async fn run_with_fallback(timeout: u64, fallback: bool) -> Result<()> {
     run_with_options(timeout, fallback, vec![]).await
 }
 
-pub async fn run_with_options(timeout: u64, _fallback: bool, cli_subnets: Vec<String>) -> Result<()> {
+pub async fn run_with_options(
+    timeout: u64,
+    _fallback: bool,
+    cli_subnets: Vec<String>,
+) -> Result<()> {
     println!();
     println!("{}", "  CONNECTO SCANNER  ".on_bright_cyan().white().bold());
     println!();
@@ -94,10 +98,19 @@ pub async fn run_with_options(timeout: u64, _fallback: bool, cli_subnets: Vec<St
         println!("{}", "No devices found.".yellow());
         println!();
         println!("{}", "Make sure:".dimmed());
-        println!("  {} The target device is running 'connecto listen'", "•".dimmed());
-        println!("  {} Your firewall allows connections on port 8099", "•".dimmed());
+        println!(
+            "  {} The target device is running 'connecto listen'",
+            "•".dimmed()
+        );
+        println!(
+            "  {} Your firewall allows connections on port 8099",
+            "•".dimmed()
+        );
         println!();
-        println!("{}", "If devices are on different subnets (e.g., VPN):".dimmed());
+        println!(
+            "{}",
+            "If devices are on different subnets (e.g., VPN):".dimmed()
+        );
         println!("  {} connecto config add-subnet 10.x.x.0/24", "→".cyan());
         println!();
         println!("{}", "Or pair directly if you know the IP:".dimmed());

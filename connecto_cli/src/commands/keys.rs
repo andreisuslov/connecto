@@ -19,7 +19,10 @@ pub async fn run(action: Option<KeysAction>) -> Result<()> {
 
 async fn list_keys(key_manager: &KeyManager) -> Result<()> {
     println!();
-    println!("{}", "  AUTHORIZED KEYS  ".on_bright_yellow().black().bold());
+    println!(
+        "{}",
+        "  AUTHORIZED KEYS  ".on_bright_yellow().black().bold()
+    );
     println!();
 
     let keys = key_manager.list_authorized_keys()?;
@@ -53,7 +56,7 @@ async fn list_keys(key_manager: &KeyManager) -> Result<()> {
         let key_preview = if parts.len() > 1 {
             let key_data = parts[1];
             if key_data.len() > 20 {
-                format!("{}...{}", &key_data[..10], &key_data[key_data.len()-10..])
+                format!("{}...{}", &key_data[..10], &key_data[key_data.len() - 10..])
             } else {
                 key_data.to_string()
             }
@@ -117,7 +120,10 @@ async fn remove_key(key_manager: &KeyManager, target: &str) -> Result<()> {
             0 => return Err(anyhow!("No keys matching '{}' found", target)),
             1 => matches[0].clone(),
             _ => {
-                warn(&format!("Multiple keys match '{}'. Please be more specific:", target));
+                warn(&format!(
+                    "Multiple keys match '{}'. Please be more specific:",
+                    target
+                ));
                 for (i, key) in matches.iter().enumerate() {
                     let parts: Vec<&str> = key.split_whitespace().collect();
                     let comment = if parts.len() > 2 {
@@ -142,12 +148,7 @@ async fn remove_key(key_manager: &KeyManager, target: &str) -> Result<()> {
     };
 
     println!("About to remove:");
-    println!(
-        "  {} {} - {}",
-        "•".red(),
-        key_type.cyan(),
-        comment.green()
-    );
+    println!("  {} {} - {}", "•".red(), key_type.cyan(), comment.green());
     println!();
 
     // Confirm
