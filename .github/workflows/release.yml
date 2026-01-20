@@ -222,4 +222,6 @@ jobs:
         run: choco pack packaging/chocolatey/connecto.nuspec --out packaging/chocolatey
 
       - name: Push to Chocolatey
-        run: choco push packaging/chocolatey/connecto.${{ steps.version.outputs.version }}.nupkg --source https://push.chocolatey.org/ --api-key ${{ secrets.CHOCOLATEY_API_KEY }}
+        env:
+          CHOCO_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
+        run: choco push packaging/chocolatey/connecto.${{ steps.version.outputs.version }}.nupkg --source https://push.chocolatey.org/ --api-key "$env:CHOCO_API_KEY"
