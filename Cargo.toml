@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "connecto_core",
     "connecto_cli",
-    # "connecto_gui",  # Needs Tauri update
+    "connecto_gui",
 ]
 
 [workspace.package]

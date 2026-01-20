@@ -57,6 +57,15 @@ pub struct ServerStatus {
     pub addresses: Vec<String>,
 }
 
+/// Paired host from SSH config
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairedHost {
+    pub host: String,
+    pub hostname: String,
+    pub user: String,
+    pub identity_file: String,
+}
+
 /// Get the current hostname
 #[tauri::command]
 pub fn get_device_name() -> String {
@@ -269,8 +278,8 @@ pub async fn stop_listener(state: State<'_, AppState>) -> Result<(), String> {
 
 /// Get listening status
 #[tauri::command]
-pub async fn get_listener_status(state: State<'_, AppState>) -> bool {
-    *state.is_listening.lock().await
+pub async fn get_listener_status(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(*state.is_listening.lock().await)
 }
 
 /// List authorized keys
@@ -319,6 +328,99 @@ pub fn generate_key_pair(
         private_path.to_string_lossy().to_string(),
         public_path.to_string_lossy().to_string(),
     ))
+}
+
+/// List paired hosts from SSH config
+#[tauri::command]
+pub fn list_paired_hosts() -> Result<Vec<PairedHost>, String> {
+    use std::fs;
+
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| "HOME/USERPROFILE not set".to_string())?;
+    let config_path = std::path::PathBuf::from(&home).join(".ssh").join("config");
+
+    if !config_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let content = fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+
+    let mut hosts: Vec<PairedHost> = Vec::new();
+    let mut in_connecto_block = false;
+    let mut current_host: Option<String> = None;
+    let mut current_hostname: Option<String> = None;
+    let mut current_user: Option<String> = None;
+    let mut current_identity: Option<String> = None;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed == "# Added by connecto" {
+            in_connecto_block = true;
+            continue;
+        }
+
+        if in_connecto_block {
+            if trimmed.starts_with("Host ") && !trimmed.contains('*') {
+                // Save previous host if complete
+                if let (Some(h), Some(hn), Some(u), Some(id)) = (
+                    current_host.take(),
+                    current_hostname.take(),
+                    current_user.take(),
+                    current_identity.take(),
+                ) {
+                    hosts.push(PairedHost {
+                        host: h,
+                        hostname: hn,
+                        user: u,
+                        identity_file: id,
+                    });
+                }
+                current_host = Some(trimmed.strip_prefix("Host ").unwrap().to_string());
+            } else if trimmed.starts_with("HostName ") {
+                current_hostname = Some(trimmed.strip_prefix("HostName ").unwrap().to_string());
+            } else if trimmed.starts_with("User ") {
+                current_user = Some(trimmed.strip_prefix("User ").unwrap().to_string());
+            } else if trimmed.starts_with("IdentityFile ") {
+                current_identity = Some(trimmed.strip_prefix("IdentityFile ").unwrap().to_string());
+                // End of this host block
+                if let (Some(h), Some(hn), Some(u), Some(id)) = (
+                    current_host.take(),
+                    current_hostname.take(),
+                    current_user.take(),
+                    current_identity.take(),
+                ) {
+                    hosts.push(PairedHost {
+                        host: h,
+                        hostname: hn,
+                        user: u,
+                        identity_file: id,
+                    });
+                }
+                in_connecto_block = false;
+            } else if trimmed.is_empty() {
+                in_connecto_block = false;
+            }
+        }
+    }
+
+    // Handle last host if still pending
+    if let (Some(h), Some(hn), Some(u), Some(id)) = (
+        current_host,
+        current_hostname,
+        current_user,
+        current_identity,
+    ) {
+        hosts.push(PairedHost {
+            host: h,
+            hostname: hn,
+            user: u,
+            identity_file: id,
+        });
+    }
+
+    Ok(hosts)
 }
 
 #[cfg(test)]

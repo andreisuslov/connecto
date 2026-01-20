@@ -10,7 +10,7 @@ name = "connecto_gui_lib"
 path = "src-tauri/src/lib.rs"
 
 [[bin]]
-name = "connecto-gui"
+name = "connecto_gui"
 path = "src-tauri/src/main.rs"
 
 [build-dependencies]

@@ -7,14 +7,15 @@
     windows_subsystem = "windows"
 )]
 
-use connecto_gui_lib::{
-    commands::{
-        generate_key_pair, get_addresses, get_device_name, get_listener_status,
-        list_authorized_keys, pair_with_address, pair_with_device, remove_authorized_key,
-        scan_devices, start_listener, stop_listener,
-    },
-    state::AppState,
+mod commands;
+mod state;
+
+use commands::{
+    generate_key_pair, get_addresses, get_device_name, get_listener_status,
+    list_authorized_keys, list_paired_hosts, pair_with_address, pair_with_device,
+    remove_authorized_key, scan_devices, start_listener, stop_listener,
 };
+use state::AppState;
 use tracing_subscriber::EnvFilter;
 
 fn main() {
@@ -37,6 +38,7 @@ fn main() {
             list_authorized_keys,
             remove_authorized_key,
             generate_key_pair,
+            list_paired_hosts,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
