@@ -82,6 +82,12 @@ You can now connect with:
 brew install andreisuslov/connecto/connecto
 ```
 
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/andreisuslov/ssh/main/install.ps1 | iex
+```
+
 ### Windows (Chocolatey)
 
 ```cmd
