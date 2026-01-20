@@ -28,6 +28,17 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build frontend
+        working-directory: connecto_gui
+        run: |
+          npm ci
+          npm run build
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -60,6 +71,17 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build frontend
+        working-directory: connecto_gui
+        run: |
+          npm ci
+          npm run build
 
       - name: Check formatting
         run: cargo fmt --all -- --check
