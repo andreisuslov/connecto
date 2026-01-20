@@ -10,16 +10,11 @@ use std::io::Write;
 use std::path::PathBuf;
 
 /// Supported SSH key algorithms
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum KeyAlgorithm {
+    #[default]
     Ed25519,
     Rsa4096,
-}
-
-impl Default for KeyAlgorithm {
-    fn default() -> Self {
-        Self::Ed25519
-    }
 }
 
 /// Represents an SSH key pair
@@ -81,12 +76,12 @@ impl SshKeyPair {
     /// Load an existing SSH key pair from files
     pub fn load_from_file(private_key_path: &str) -> Result<Self> {
         // Read private key
-        let private_key = fs::read_to_string(private_key_path).map_err(|e| ConnectoError::Io(e))?;
+        let private_key = fs::read_to_string(private_key_path).map_err(ConnectoError::Io)?;
 
         // Read public key (same path + .pub)
         let public_key_path = format!("{}.pub", private_key_path);
         let public_key = fs::read_to_string(&public_key_path)
-            .map_err(|e| ConnectoError::Io(e))?
+            .map_err(ConnectoError::Io)?
             .trim()
             .to_string();
 

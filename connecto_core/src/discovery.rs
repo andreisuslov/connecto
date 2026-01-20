@@ -352,7 +352,7 @@ impl SubnetScanner {
             (network + 1, broadcast) // Just skip network address for larger subnets
         };
 
-        let ips: Vec<Ipv4Addr> = (start..=end).map(|n| Ipv4Addr::from(n)).collect();
+        let ips: Vec<Ipv4Addr> = (start..=end).map(Ipv4Addr::from).collect();
 
         Ok(ips)
     }
