@@ -12,6 +12,10 @@ pub struct Config {
     /// Additional subnets to scan (in CIDR notation)
     #[serde(default)]
     pub subnets: Vec<String>,
+
+    /// Default SSH key to use for pairing (path to private key)
+    #[serde(default)]
+    pub default_key: Option<String>,
 }
 
 impl Config {
@@ -74,6 +78,16 @@ impl Config {
         let len_before = self.subnets.len();
         self.subnets.retain(|s| s != subnet);
         self.subnets.len() < len_before
+    }
+
+    /// Set the default SSH key
+    pub fn set_default_key(&mut self, key_path: &str) {
+        self.default_key = Some(key_path.to_string());
+    }
+
+    /// Clear the default SSH key
+    pub fn clear_default_key(&mut self) {
+        self.default_key = None;
     }
 }
 
