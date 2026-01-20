@@ -267,7 +267,7 @@ fn add_to_ssh_config(
     host: &str,
     hostname: &str,
     user: &str,
-    identity_file: &PathBuf,
+    identity_file: &std::path::Path,
 ) -> Result<bool> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
