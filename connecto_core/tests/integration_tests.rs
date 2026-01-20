@@ -94,7 +94,10 @@ fn test_protocol_messages() {
     let parsed = Message::from_json(&json).unwrap();
 
     match parsed {
-        Message::Hello { version, device_name } => {
+        Message::Hello {
+            version,
+            device_name,
+        } => {
             assert_eq!(version, PROTOCOL_VERSION);
             assert_eq!(device_name, "Test Device");
         }
@@ -112,7 +115,11 @@ fn test_protocol_messages() {
     let parsed = Message::from_json(&json).unwrap();
 
     match parsed {
-        Message::HelloAck { version, device_name, verification_code } => {
+        Message::HelloAck {
+            version,
+            device_name,
+            verification_code,
+        } => {
             assert_eq!(version, PROTOCOL_VERSION);
             assert_eq!(device_name, "Server");
             assert_eq!(verification_code, Some("1234".to_string()));
@@ -130,7 +137,10 @@ fn test_protocol_messages() {
     let parsed = Message::from_json(&json).unwrap();
 
     match parsed {
-        Message::KeyExchange { public_key, comment } => {
+        Message::KeyExchange {
+            public_key,
+            comment,
+        } => {
             assert!(public_key.starts_with("ssh-ed25519"));
             assert_eq!(comment, "test@connecto");
         }
@@ -153,9 +163,7 @@ async fn test_full_pairing_workflow() {
     let (event_tx, mut event_rx) = mpsc::channel(10);
 
     // Run server in background
-    let server_task = tokio::spawn(async move {
-        server.handle_one(event_tx).await
-    });
+    let server_task = tokio::spawn(async move { server.handle_one(event_tx).await });
 
     // Give server time to start
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -187,9 +195,15 @@ async fn test_full_pairing_workflow() {
     }
 
     // Should have received: Started, ClientConnected, PairingRequest, KeyReceived, PairingComplete
-    assert!(events.iter().any(|e| matches!(e, ServerEvent::Started { .. })));
-    assert!(events.iter().any(|e| matches!(e, ServerEvent::ClientConnected { .. })));
-    assert!(events.iter().any(|e| matches!(e, ServerEvent::PairingComplete { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, ServerEvent::Started { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, ServerEvent::ClientConnected { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, ServerEvent::PairingComplete { .. })));
 }
 
 /// Test protocol version mismatch handling

@@ -11,7 +11,10 @@ use super::{info, success, warn};
 
 pub async fn run(name: String, comment: Option<String>, rsa: bool) -> Result<()> {
     println!();
-    println!("{}", "  SSH KEY GENERATOR  ".on_bright_green().black().bold());
+    println!(
+        "{}",
+        "  SSH KEY GENERATOR  ".on_bright_green().black().bold()
+    );
     println!();
 
     // Determine algorithm

@@ -66,8 +66,9 @@ pub struct ServiceAdvertiser {
 impl ServiceAdvertiser {
     /// Create a new service advertiser
     pub fn new() -> Result<Self> {
-        let daemon = ServiceDaemon::new()
-            .map_err(|e| ConnectoError::Discovery(format!("Failed to create mDNS daemon: {}", e)))?;
+        let daemon = ServiceDaemon::new().map_err(|e| {
+            ConnectoError::Discovery(format!("Failed to create mDNS daemon: {}", e))
+        })?;
 
         Ok(Self {
             daemon,
@@ -133,8 +134,9 @@ pub struct ServiceBrowser {
 impl ServiceBrowser {
     /// Create a new service browser
     pub fn new() -> Result<Self> {
-        let daemon = ServiceDaemon::new()
-            .map_err(|e| ConnectoError::Discovery(format!("Failed to create mDNS daemon: {}", e)))?;
+        let daemon = ServiceDaemon::new().map_err(|e| {
+            ConnectoError::Discovery(format!("Failed to create mDNS daemon: {}", e))
+        })?;
 
         Ok(Self {
             daemon,
@@ -329,11 +331,17 @@ impl SubnetScanner {
 
         // For safety, limit to /16 or smaller (max 65534 hosts)
         if prefix < 16 {
-            return Err("Prefix length must be at least /16 to avoid scanning too many hosts".to_string());
+            return Err(
+                "Prefix length must be at least /16 to avoid scanning too many hosts".to_string(),
+            );
         }
 
         let base_u32 = u32::from(base_ip);
-        let mask = if prefix == 32 { !0u32 } else { !0u32 << (32 - prefix) };
+        let mask = if prefix == 32 {
+            !0u32
+        } else {
+            !0u32 << (32 - prefix)
+        };
         let network = base_u32 & mask;
         let broadcast = network | !mask;
 
@@ -344,9 +352,7 @@ impl SubnetScanner {
             (network + 1, broadcast) // Just skip network address for larger subnets
         };
 
-        let ips: Vec<Ipv4Addr> = (start..=end)
-            .map(|n| Ipv4Addr::from(n))
-            .collect();
+        let ips: Vec<Ipv4Addr> = (start..=end).map(|n| Ipv4Addr::from(n)).collect();
 
         Ok(ips)
     }
@@ -369,7 +375,8 @@ impl SubnetScanner {
         }
 
         let mut all_ips_to_scan: Vec<Ipv4Addr> = Vec::new();
-        let mut scanned_subnets: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut scanned_subnets: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         for local_ip in &local_ips {
             let octets = local_ip.octets();
@@ -389,7 +396,10 @@ impl SubnetScanner {
                 }
                 scanned_subnets.insert(subnet_key);
 
-                debug!("Scanning VPN subnet {}.{}.{}.0/22", octets[0], octets[1], base_third);
+                debug!(
+                    "Scanning VPN subnet {}.{}.{}.0/22",
+                    octets[0], octets[1], base_third
+                );
 
                 for third in base_third..base_third + 4 {
                     for last in 1..255u8 {
@@ -407,7 +417,10 @@ impl SubnetScanner {
                 }
                 scanned_subnets.insert(subnet_key);
 
-                debug!("Scanning subnet {}.{}.{}.0/24", octets[0], octets[1], octets[2]);
+                debug!(
+                    "Scanning subnet {}.{}.{}.0/24",
+                    octets[0], octets[1], octets[2]
+                );
 
                 for last in 1..255u8 {
                     let ip = Ipv4Addr::new(octets[0], octets[1], octets[2], last);
@@ -430,9 +443,7 @@ impl SubnetScanner {
 
         // Scan with concurrency limit of 100
         let results: Vec<Option<DiscoveredDevice>> = stream::iter(ips)
-            .map(|ip| async move {
-                Self::probe_host(ip, port, timeout).await
-            })
+            .map(|ip| async move { Self::probe_host(ip, port, timeout).await })
             .buffer_unordered(100)
             .collect()
             .await;
@@ -474,9 +485,13 @@ impl SubnetScanner {
             version: 1,
             device_name: format!("scanner-{}", std::process::id()),
         };
-        writer.write_all(hello.to_json()?.as_bytes()).await
+        writer
+            .write_all(hello.to_json()?.as_bytes())
+            .await
             .map_err(|e| ConnectoError::Network(e.to_string()))?;
-        writer.write_all(b"\n").await
+        writer
+            .write_all(b"\n")
+            .await
             .map_err(|e| ConnectoError::Network(e.to_string()))?;
 
         // Read HelloAck response
@@ -490,18 +505,14 @@ impl SubnetScanner {
             .map_err(|e| ConnectoError::Protocol(format!("Invalid response: {}", e)))?;
 
         match response {
-            Message::HelloAck { device_name, .. } => {
-                Ok(DiscoveredDevice {
-                    name: device_name.clone(),
-                    hostname: format!("{}.local.", device_name.to_lowercase().replace(' ', "-")),
-                    addresses: vec![IpAddr::V4(ip)],
-                    port,
-                    instance_name: format!("{}._connecto._tcp.local.", device_name),
-                })
-            }
-            Message::Error { message, .. } => {
-                Err(ConnectoError::Protocol(message))
-            }
+            Message::HelloAck { device_name, .. } => Ok(DiscoveredDevice {
+                name: device_name.clone(),
+                hostname: format!("{}.local.", device_name.to_lowercase().replace(' ', "-")),
+                addresses: vec![IpAddr::V4(ip)],
+                port,
+                instance_name: format!("{}._connecto._tcp.local.", device_name),
+            }),
+            Message::Error { message, .. } => Err(ConnectoError::Protocol(message)),
             _ => Err(ConnectoError::Protocol("Unexpected response".to_string())),
         }
     }

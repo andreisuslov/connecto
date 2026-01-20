@@ -34,8 +34,8 @@ impl Config {
         let content = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read config from {}", path.display()))?;
 
-        let config: Config = serde_json::from_str(&content)
-            .with_context(|| "Failed to parse config file")?;
+        let config: Config =
+            serde_json::from_str(&content).with_context(|| "Failed to parse config file")?;
 
         Ok(config)
     }
@@ -46,12 +46,12 @@ impl Config {
 
         // Create parent directory if needed
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create config directory {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create config directory {}", parent.display())
+            })?;
         }
 
-        let content = serde_json::to_string_pretty(self)
-            .context("Failed to serialize config")?;
+        let content = serde_json::to_string_pretty(self).context("Failed to serialize config")?;
 
         fs::write(&path, content)
             .with_context(|| format!("Failed to write config to {}", path.display()))?;

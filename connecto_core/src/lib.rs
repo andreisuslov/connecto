@@ -54,10 +54,15 @@ pub mod keys;
 pub mod protocol;
 
 // Re-export commonly used types
-pub use discovery::{DiscoveredDevice, DiscoveryEvent, ServiceAdvertiser, ServiceBrowser, SubnetScanner, DEFAULT_PORT, SERVICE_TYPE};
+pub use discovery::{
+    DiscoveredDevice, DiscoveryEvent, ServiceAdvertiser, ServiceBrowser, SubnetScanner,
+    DEFAULT_PORT, SERVICE_TYPE,
+};
 pub use error::{ConnectoError, Result};
 pub use keys::{KeyAlgorithm, KeyManager, SshKeyPair};
-pub use protocol::{HandshakeClient, HandshakeServer, Message, PairingResult, ServerEvent, PROTOCOL_VERSION};
+pub use protocol::{
+    HandshakeClient, HandshakeServer, Message, PairingResult, ServerEvent, PROTOCOL_VERSION,
+};
 
 /// Get the version of the connecto_core library
 pub fn version() -> &'static str {

@@ -75,8 +75,7 @@ impl SshKeyPair {
         }
 
         let key_data = format!("{} {}", parts[0], parts[1]);
-        PublicKey::from_openssh(&key_data)
-            .map_err(|e| ConnectoError::KeyParsing(e.to_string()))
+        PublicKey::from_openssh(&key_data).map_err(|e| ConnectoError::KeyParsing(e.to_string()))
     }
 }
 
@@ -101,10 +100,12 @@ impl KeyManager {
     pub fn default_ssh_dir() -> Result<PathBuf> {
         UserDirs::new()
             .map(|dirs| dirs.home_dir().join(".ssh"))
-            .ok_or_else(|| ConnectoError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "Could not determine home directory",
-            )))
+            .ok_or_else(|| {
+                ConnectoError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Could not determine home directory",
+                ))
+            })
     }
 
     /// Ensure the SSH directory exists with proper permissions
@@ -286,7 +287,8 @@ mod tests {
         let manager = KeyManager::with_dir(ssh_dir.clone());
         let key_pair = SshKeyPair::generate(KeyAlgorithm::Ed25519, "test@connecto").unwrap();
 
-        let (private_path, public_path) = manager.save_key_pair(&key_pair, "connecto_test").unwrap();
+        let (private_path, public_path) =
+            manager.save_key_pair(&key_pair, "connecto_test").unwrap();
 
         assert!(private_path.exists());
         assert!(public_path.exists());
@@ -340,7 +342,9 @@ mod tests {
         manager.add_authorized_key(&key_pair1.public_key).unwrap();
         manager.add_authorized_key(&key_pair2.public_key).unwrap();
 
-        let removed = manager.remove_authorized_key(&key_pair1.public_key).unwrap();
+        let removed = manager
+            .remove_authorized_key(&key_pair1.public_key)
+            .unwrap();
         assert!(removed);
 
         let keys = manager.list_authorized_keys().unwrap();

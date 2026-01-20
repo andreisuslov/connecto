@@ -17,7 +17,10 @@ pub async fn run(port: u16, name: Option<String>, verify: bool, continuous: bool
 
     // Print header
     println!();
-    println!("{}", "  CONNECTO LISTENER  ".on_bright_blue().white().bold());
+    println!(
+        "{}",
+        "  CONNECTO LISTENER  ".on_bright_blue().white().bold()
+    );
     println!();
 
     // Show local addresses
@@ -86,10 +89,7 @@ pub async fn run(port: u16, name: Option<String>, verify: bool, continuous: bool
                 ServerEvent::ClientConnected { address } => {
                     println!();
                     last_client_ip = Some(address.ip().to_string());
-                    info(&format!(
-                        "Connection from {}",
-                        address.to_string().yellow()
-                    ));
+                    info(&format!("Connection from {}", address.to_string().yellow()));
                 }
                 ServerEvent::PairingRequest {
                     device_name,
@@ -110,22 +110,19 @@ pub async fn run(port: u16, name: Option<String>, verify: bool, continuous: bool
                         "Successfully paired with {}!",
                         device_name.green().bold()
                     ));
-                    println!(
-                        "  {} They can now SSH to this machine.",
-                        "→".cyan()
-                    );
+                    println!("  {} They can now SSH to this machine.", "→".cyan());
 
                     // Check if client is from a different subnet (VPN scenario)
                     if let Some(ref client_ip) = last_client_ip {
-                        let client_subnet: String = client_ip
-                            .split('.')
-                            .take(3)
-                            .collect::<Vec<_>>()
-                            .join(".");
+                        let client_subnet: String =
+                            client_ip.split('.').take(3).collect::<Vec<_>>().join(".");
 
                         if !local_subnets.iter().any(|s| s == &client_subnet) {
                             println!();
-                            println!("{}", "VPN/Cross-subnet connection detected!".yellow().bold());
+                            println!(
+                                "{}",
+                                "VPN/Cross-subnet connection detected!".yellow().bold()
+                            );
                             println!(
                                 "  {} Tell {} to save your subnet for future scans:",
                                 "→".cyan(),
@@ -133,7 +130,8 @@ pub async fn run(port: u16, name: Option<String>, verify: bool, continuous: bool
                             );
                             println!(
                                 "    {}",
-                                format!("connecto config add-subnet {}.0/24", client_subnet).dimmed()
+                                format!("connecto config add-subnet {}.0/24", client_subnet)
+                                    .dimmed()
                             );
                         }
                     }
