@@ -6,9 +6,9 @@
     <title>Connecto</title>
     <authors>Connecto Team</authors>
     <owners>andreisuslov</owners>
-    <licenseUrl>https://github.com/andreisuslov/ssh/blob/main/LICENSE</licenseUrl>
-    <projectUrl>https://github.com/andreisuslov/ssh</projectUrl>
-    <iconUrl>https://raw.githubusercontent.com/andreisuslov/ssh/main/assets/icon.png</iconUrl>
+    <licenseUrl>https://github.com/andreisuslov/connecto/blob/main/LICENSE</licenseUrl>
+    <projectUrl>https://github.com/andreisuslov/connecto</projectUrl>
+    <iconUrl>https://raw.githubusercontent.com/andreisuslov/connecto/main/assets/icon.png</iconUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <description>AirDrop-like SSH key pairing for your terminal.
 
@@ -22,12 +22,12 @@ Connecto eliminates the hassle of manual SSH key setup. Instead of copying IP ad
 - **Cross-platform**: Works on Linux, macOS, and Windows
     </description>
     <summary>AirDrop-like SSH key pairing for your terminal</summary>
-    <releaseNotes>https://github.com/andreisuslov/ssh/releases</releaseNotes>
+    <releaseNotes>https://github.com/andreisuslov/connecto/releases</releaseNotes>
     <copyright>Copyright (c) 2025 Connecto Team</copyright>
     <tags>ssh key-management pairing mdns network cli</tags>
-    <packageSourceUrl>https://github.com/andreisuslov/ssh/tree/main/packaging/chocolatey</packageSourceUrl>
-    <docsUrl>https://github.com/andreisuslov/ssh#readme</docsUrl>
-    <bugTrackerUrl>https://github.com/andreisuslov/ssh/issues</bugTrackerUrl>
+    <packageSourceUrl>https://github.com/andreisuslov/connecto/tree/main/packaging/chocolatey</packageSourceUrl>
+    <docsUrl>https://github.com/andreisuslov/connecto#readme</docsUrl>
+    <bugTrackerUrl>https://github.com/andreisuslov/connecto/issues</bugTrackerUrl>
   </metadata>
   <files>
     <file src="tools\**" target="tools" />

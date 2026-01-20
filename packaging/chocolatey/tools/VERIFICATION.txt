@@ -7,7 +7,7 @@ This package is published by the project maintainer and the binaries are
 identical to those published on the GitHub Releases page.
 
 1. Download the official release from:
-   https://github.com/andreisuslov/ssh/releases
+   https://github.com/andreisuslov/connecto/releases
 
 2. Download the file: connecto-windows-x86_64.zip
 
@@ -18,7 +18,7 @@ identical to those published on the GitHub Releases page.
 4. The checksum should match the $checksum variable in chocolateyInstall.ps1
 
 The source code is available at:
-https://github.com/andreisuslov/ssh
+https://github.com/andreisuslov/connecto
 
 The license (MIT) is available at:
-https://github.com/andreisuslov/ssh/blob/main/LICENSE
+https://github.com/andreisuslov/connecto/blob/main/LICENSE

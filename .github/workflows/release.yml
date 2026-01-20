@@ -138,16 +138,16 @@ jobs:
           cat > Formula/connecto.rb << 'FORMULA'
           class Connecto < Formula
             desc "AirDrop-like SSH key pairing for your terminal"
-            homepage "https://github.com/andreisuslov/ssh"
+            homepage "https://github.com/andreisuslov/connecto"
             license "MIT"
             version "VERSION_PLACEHOLDER"
 
             on_macos do
               if Hardware::CPU.arm?
-                url "https://github.com/andreisuslov/ssh/releases/download/vVERSION_PLACEHOLDER/connecto-macos-aarch64.tar.gz"
+                url "https://github.com/andreisuslov/connecto/releases/download/vVERSION_PLACEHOLDER/connecto-macos-aarch64.tar.gz"
                 sha256 "ARM64_SHA_PLACEHOLDER"
               else
-                url "https://github.com/andreisuslov/ssh/releases/download/vVERSION_PLACEHOLDER/connecto-macos-x86_64.tar.gz"
+                url "https://github.com/andreisuslov/connecto/releases/download/vVERSION_PLACEHOLDER/connecto-macos-x86_64.tar.gz"
                 sha256 "X86_64_SHA_PLACEHOLDER"
               end
             end
