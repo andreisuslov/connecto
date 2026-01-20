@@ -1,7 +1,6 @@
 //! Application state management
 
 use connecto_core::discovery::{DiscoveredDevice, ServiceAdvertiser};
-use std::sync::Arc;
 use tokio::sync::Mutex;
 
 /// Global application state

@@ -5,14 +5,11 @@ use connecto_core::{
         get_hostname, get_local_addresses, DiscoveredDevice, ServiceAdvertiser, ServiceBrowser,
     },
     keys::{KeyAlgorithm, KeyManager, SshKeyPair},
-    protocol::{HandshakeClient, HandshakeServer, ServerEvent},
-    DEFAULT_PORT,
+    protocol::{HandshakeClient, HandshakeServer},
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::time::Duration;
 use tauri::State;
-use tokio::sync::{mpsc, Mutex};
 
 use crate::state::AppState;
 
