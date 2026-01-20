@@ -128,7 +128,7 @@ export function ListenTab() {
                 </TooltipTrigger>
                 <TooltipContent>
                   <p className="max-w-xs">
-                    Need help setting up?{' '}
+                    Need help?{' '}
                     <a
                       href="https://andreisuslov.github.io/connecto/"
                       target="_blank"
