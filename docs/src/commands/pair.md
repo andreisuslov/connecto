@@ -14,6 +14,14 @@ connecto pair <TARGET>
 |----------|-------------|
 | `TARGET` | Device number from scan, or direct IP:port |
 
+## Options
+
+| Option | Description |
+|--------|-------------|
+| `-k, --key <PATH>` | Use existing SSH key instead of generating new |
+| `-c, --comment <TEXT>` | Custom key comment |
+| `--rsa` | Generate RSA-4096 instead of Ed25519 |
+
 ## Description
 
 The `pair` command establishes SSH key-based authentication with a remote device:
@@ -103,6 +111,41 @@ This is useful when:
 - The remote machine was reinstalled
 - You want to refresh the keys
 - The IP address changed
+
+## Using Existing Keys
+
+Instead of generating a new key for each pairing, you can use an existing SSH key.
+
+### One-time Usage
+
+```bash
+connecto pair 0 --key ~/.ssh/id_ed25519
+```
+
+### Set Default Key
+
+Set a default key for all future pairings:
+
+```bash
+connecto config set-default-key ~/.ssh/id_ed25519
+```
+
+Now all `connecto pair` commands will use this key automatically.
+
+### Clear Default Key
+
+Return to generating new keys:
+
+```bash
+connecto config clear-default-key
+```
+
+### Priority Order
+
+When pairing, Connecto looks for keys in this order:
+1. `--key` flag (if specified)
+2. Config default key (if set)
+3. Generate new key (default behavior)
 
 ## After Pairing
 

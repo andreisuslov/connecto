@@ -14,7 +14,9 @@ connecto config <SUBCOMMAND>
 |------------|-------------|
 | `add-subnet <CIDR>` | Add a subnet to scan automatically |
 | `remove-subnet <CIDR>` | Remove a saved subnet |
-| `list` | List all saved subnets |
+| `set-default-key <PATH>` | Set default SSH key for pairing |
+| `clear-default-key` | Clear the default SSH key |
+| `list` | List all configuration |
 | `path` | Show config file location |
 
 ---
@@ -47,6 +49,43 @@ connecto config remove-subnet 10.0.2.0/24
 Output:
 ```
 ✓ Removed subnet: 10.0.2.0/24
+```
+
+---
+
+## set-default-key
+
+Set a default SSH key to use for all pairings.
+
+```bash
+connecto config set-default-key ~/.ssh/id_ed25519
+```
+
+Output:
+```
+✓ Default key set: /Users/john/.ssh/id_ed25519
+  → All future pairings will use this key.
+```
+
+This is useful when you want to:
+- Reuse your existing SSH key across all devices
+- Use a single key for easier management
+- Avoid generating multiple Connecto-specific keys
+
+---
+
+## clear-default-key
+
+Remove the default SSH key setting.
+
+```bash
+connecto config clear-default-key
+```
+
+Output:
+```
+✓ Default key cleared.
+  → Pairings will generate new keys again.
 ```
 
 ---
@@ -101,7 +140,8 @@ The config file is JSON:
   "subnets": [
     "10.0.2.0/24",
     "10.0.3.0/24"
-  ]
+  ],
+  "default_key": "/Users/john/.ssh/id_ed25519"
 }
 ```
 
