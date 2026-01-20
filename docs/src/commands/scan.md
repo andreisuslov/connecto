@@ -20,7 +20,7 @@ The `scan` command discovers devices on your network that are running `connecto 
 | Option | Description |
 |--------|-------------|
 | `-s, --subnet <CIDR>` | Additional subnet to scan (can be repeated) |
-| `-t, --timeout <MS>` | Scan timeout in milliseconds (default: 3000) |
+| `-t, --timeout <SECONDS>` | Scan timeout in seconds (default: 5) |
 
 ## Examples
 

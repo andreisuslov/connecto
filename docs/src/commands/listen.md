@@ -24,6 +24,7 @@ The `listen` command starts a pairing listener on the current machine. It:
 | `-p, --port <PORT>` | Port to listen on (default: 8099) |
 | `-n, --name <NAME>` | Device name to advertise (default: hostname) |
 | `-c, --continuous` | Keep listening after successful pairing |
+| `--verify` | Require verification code for pairing |
 
 ## Examples
 

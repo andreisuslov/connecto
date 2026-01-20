@@ -22,7 +22,8 @@ connecto config path
   "subnets": [
     "10.0.2.0/24",
     "192.168.100.0/24"
-  ]
+  ],
+  "default_key": "/Users/john/.ssh/id_ed25519"
 }
 ```
 
@@ -31,6 +32,7 @@ connecto config path
 | Field | Type | Description |
 |-------|------|-------------|
 | `subnets` | `string[]` | CIDR ranges to scan automatically |
+| `default_key` | `string?` | Path to default SSH key for pairing (optional) |
 
 ## SSH Configuration
 
@@ -80,12 +82,10 @@ Connecto generates Ed25519 keys by default:
 
 ## Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `CONNECTO_PORT` | Override default port | `8099` |
-| `CONNECTO_NAME` | Override device name | hostname |
-| `HOME` | Home directory (Unix) | - |
-| `USERPROFILE` | Home directory (Windows) | - |
+| Variable | Description |
+|----------|-------------|
+| `HOME` | Home directory (Unix) - used to find `~/.ssh` |
+| `USERPROFILE` | Home directory (Windows) - used to find `.ssh` |
 
 ## Ports
 

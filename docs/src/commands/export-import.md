@@ -45,22 +45,19 @@ connecto export | pbcopy
 ```json
 {
   "version": 1,
-  "exported_at": "2024-01-15T10:30:00Z",
   "hosts": [
     {
-      "name": "mydesktop",
+      "host": "mydesktop",
       "hostname": "192.168.1.55",
       "user": "john",
-      "key_path": "~/.ssh/connecto_mydesktop",
-      "private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\n...",
-      "public_key": "ssh-ed25519 AAAA... connecto_mydesktop"
+      "identity_file": "~/.ssh/connecto_mydesktop"
     }
   ],
-  "config": {
-    "subnets": ["10.0.2.0/24", "10.0.3.0/24"]
-  }
+  "subnets": ["10.0.2.0/24", "10.0.3.0/24"]
 }
 ```
+
+Note: The export contains SSH config entries only, not the actual key files. To fully backup/restore, you should also copy the key files from `~/.ssh/`.
 
 ---
 
@@ -156,14 +153,14 @@ connecto import ~/Dropbox/connecto.json
 
 ## Security Notes
 
-- The export contains **private keys** - treat it as sensitive data
-- Don't share export files publicly
-- Delete temporary export files after use
-- Consider encrypting backups:
+- The export contains **references to private keys** (file paths), not the keys themselves
+- The actual key files in `~/.ssh/` should be backed up separately
+- For a complete backup, also copy the key files:
 
 ```bash
-connecto export | gpg -c > connecto-backup.gpg
-gpg -d connecto-backup.gpg | connecto import -
+# Full backup
+connecto export > connecto-backup.json
+cp ~/.ssh/connecto_* ~/backup/
 ```
 
 ## Related Commands
