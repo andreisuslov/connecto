@@ -77,6 +77,48 @@ impl SshKeyPair {
         let key_data = format!("{} {}", parts[0], parts[1]);
         PublicKey::from_openssh(&key_data).map_err(|e| ConnectoError::KeyParsing(e.to_string()))
     }
+
+    /// Load an existing SSH key pair from files
+    pub fn load_from_file(private_key_path: &str) -> Result<Self> {
+        // Read private key
+        let private_key = fs::read_to_string(private_key_path).map_err(|e| ConnectoError::Io(e))?;
+
+        // Read public key (same path + .pub)
+        let public_key_path = format!("{}.pub", private_key_path);
+        let public_key = fs::read_to_string(&public_key_path)
+            .map_err(|e| ConnectoError::Io(e))?
+            .trim()
+            .to_string();
+
+        // Parse private key to determine algorithm
+        let parsed_private = PrivateKey::from_openssh(&private_key)
+            .map_err(|e| ConnectoError::KeyParsing(e.to_string()))?;
+
+        let algorithm = match parsed_private.algorithm() {
+            Algorithm::Ed25519 => KeyAlgorithm::Ed25519,
+            Algorithm::Rsa { .. } => KeyAlgorithm::Rsa4096,
+            _ => {
+                return Err(ConnectoError::KeyParsing(
+                    "Unsupported key algorithm".to_string(),
+                ))
+            }
+        };
+
+        // Extract comment from public key
+        let parts: Vec<&str> = public_key.split_whitespace().collect();
+        let comment = if parts.len() > 2 {
+            parts[2..].join(" ")
+        } else {
+            String::new()
+        };
+
+        Ok(Self {
+            private_key,
+            public_key,
+            algorithm,
+            comment,
+        })
+    }
 }
 
 /// Manager for SSH key files on disk

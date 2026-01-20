@@ -84,6 +84,10 @@ enum Commands {
         /// Generate RSA key instead of Ed25519
         #[arg(long)]
         rsa: bool,
+
+        /// Use existing SSH key instead of generating a new one
+        #[arg(short, long, value_name = "PATH")]
+        key: Option<String>,
     },
 
     /// List authorized keys on this machine
@@ -181,6 +185,13 @@ enum ConfigAction {
         /// Subnet to remove
         subnet: String,
     },
+    /// Set default SSH key for all pairings
+    SetDefaultKey {
+        /// Path to private key (e.g., ~/.ssh/id_ed25519)
+        key_path: String,
+    },
+    /// Clear the default SSH key
+    ClearDefaultKey,
     /// List current configuration
     List,
     /// Show config file path
@@ -218,7 +229,8 @@ async fn main() -> Result<()> {
             target,
             comment,
             rsa,
-        } => commands::pair::run(target, comment, rsa).await,
+            key,
+        } => commands::pair::run(target, comment, rsa, key).await,
         Commands::Keys { action } => commands::keys::run(action).await,
         Commands::Keygen { name, comment, rsa } => commands::keygen::run(name, comment, rsa).await,
         Commands::Config { action } => run_config(action),
@@ -358,20 +370,86 @@ fn run_config(action: ConfigAction) -> Result<()> {
                 println!("{} Subnet not found: {}", "✗".red(), subnet);
             }
         }
+        ConfigAction::SetDefaultKey { key_path } => {
+            // Expand ~ to home directory
+            let expanded_path = if key_path.starts_with("~/") {
+                let home = std::env::var("HOME")
+                    .or_else(|_| std::env::var("USERPROFILE"))
+                    .map_err(|_| anyhow::anyhow!("HOME/USERPROFILE not set"))?;
+                key_path.replacen("~", &home, 1)
+            } else {
+                key_path.clone()
+            };
+
+            // Verify the key exists
+            let key_file = std::path::Path::new(&expanded_path);
+            if !key_file.exists() {
+                println!("{} Key file not found: {}", "✗".red(), expanded_path);
+                return Ok(());
+            }
+
+            // Verify it's a valid SSH key (check for public key too)
+            let pub_key_path = format!("{}.pub", expanded_path);
+            if !std::path::Path::new(&pub_key_path).exists() {
+                println!(
+                    "{} Public key not found: {}",
+                    "✗".red(),
+                    pub_key_path.dimmed()
+                );
+                println!(
+                    "  {} Both private and public key files are required.",
+                    "→".yellow()
+                );
+                return Ok(());
+            }
+
+            let mut cfg = config::Config::load()?;
+            cfg.set_default_key(&expanded_path);
+            cfg.save()?;
+            println!("{} Default key set: {}", "✓".green(), expanded_path.cyan());
+            println!("  {} All future pairings will use this key.", "→".dimmed());
+        }
+        ConfigAction::ClearDefaultKey => {
+            let mut cfg = config::Config::load()?;
+            if cfg.default_key.is_some() {
+                cfg.clear_default_key();
+                cfg.save()?;
+                println!("{} Default key cleared.", "✓".green());
+                println!("  {} Pairings will generate new keys again.", "→".dimmed());
+            } else {
+                println!("{} No default key was set.", "→".yellow());
+            }
+        }
         ConfigAction::List => {
             let cfg = config::Config::load()?;
-            if cfg.subnets.is_empty() {
-                println!("{}", "No subnets configured.".dimmed());
+            let mut has_config = false;
+
+            if !cfg.subnets.is_empty() {
+                has_config = true;
+                println!("{}", "Configured subnets:".bold());
+                for subnet in &cfg.subnets {
+                    println!("  {} {}", "•".cyan(), subnet);
+                }
+            }
+
+            if let Some(key) = &cfg.default_key {
+                has_config = true;
+                println!();
+                println!("{}", "Default SSH key:".bold());
+                println!("  {} {}", "•".cyan(), key);
+            }
+
+            if !has_config {
+                println!("{}", "No configuration set.".dimmed());
                 println!();
                 println!(
                     "Add subnets to scan with: {}",
                     "connecto config add-subnet <cidr>".cyan()
                 );
-            } else {
-                println!("{}", "Configured subnets:".bold());
-                for subnet in &cfg.subnets {
-                    println!("  {} {}", "•".cyan(), subnet);
-                }
+                println!(
+                    "Set default key with: {}",
+                    "connecto config set-default-key <path>".cyan()
+                );
             }
         }
         ConfigAction::Path => {

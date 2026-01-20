@@ -16,8 +16,14 @@ use std::time::Duration;
 
 use super::scan::load_cached_devices;
 use super::{error, info, success, warn};
+use crate::config::Config;
 
-pub async fn run(target: String, comment: Option<String>, rsa: bool) -> Result<()> {
+pub async fn run(
+    target: String,
+    comment: Option<String>,
+    rsa: bool,
+    key_path: Option<String>,
+) -> Result<()> {
     println!();
     println!(
         "{}",
@@ -31,24 +37,12 @@ pub async fn run(target: String, comment: Option<String>, rsa: bool) -> Result<(
     info(&format!("Connecting to {}...", address.cyan()));
     println!();
 
-    // Generate key
-    let algorithm = if rsa {
-        warn("Using RSA-4096 (Ed25519 is recommended for better security)");
-        KeyAlgorithm::Rsa4096
-    } else {
-        info("Using Ed25519 key (modern, secure, fast)");
-        KeyAlgorithm::Ed25519
-    };
+    // Determine which key to use
+    // Priority: 1. --key flag, 2. config default_key, 3. generate new key
+    let effective_key_path =
+        key_path.or_else(|| Config::load().ok().and_then(|cfg| cfg.default_key.clone()));
 
-    let key_comment = comment.unwrap_or_else(|| {
-        let user = std::env::var("USER")
-            .or_else(|_| std::env::var("USERNAME"))
-            .unwrap_or_else(|_| "user".to_string());
-        let hostname = get_hostname();
-        format!("{}@{}", user, hostname)
-    });
-
-    // Create spinner for key generation
+    // Create spinner
     let spinner = ProgressBar::new_spinner();
     spinner.set_style(
         ProgressStyle::default_spinner()
@@ -56,10 +50,51 @@ pub async fn run(target: String, comment: Option<String>, rsa: bool) -> Result<(
             .template("{spinner:.magenta} {msg}")
             .unwrap(),
     );
-    spinner.set_message("Generating SSH key pair...");
-    spinner.enable_steady_tick(Duration::from_millis(80));
 
-    let key_pair = SshKeyPair::generate(algorithm, &key_comment)?;
+    let (key_pair, using_existing_key, existing_key_path) =
+        if let Some(key_file) = effective_key_path {
+            // Use existing key
+            let expanded_path = expand_path(&key_file)?;
+            let pub_key_path = format!("{}.pub", expanded_path);
+
+            if !std::path::Path::new(&expanded_path).exists() {
+                return Err(anyhow!("Key file not found: {}", expanded_path));
+            }
+            if !std::path::Path::new(&pub_key_path).exists() {
+                return Err(anyhow!("Public key not found: {}", pub_key_path));
+            }
+
+            info(&format!("Using existing key: {}", expanded_path.cyan()));
+
+            spinner.set_message("Loading existing SSH key...");
+            spinner.enable_steady_tick(Duration::from_millis(80));
+
+            let key_pair = SshKeyPair::load_from_file(&expanded_path)?;
+            (key_pair, true, Some(expanded_path))
+        } else {
+            // Generate new key
+            let algorithm = if rsa {
+                warn("Using RSA-4096 (Ed25519 is recommended for better security)");
+                KeyAlgorithm::Rsa4096
+            } else {
+                info("Using Ed25519 key (modern, secure, fast)");
+                KeyAlgorithm::Ed25519
+            };
+
+            let key_comment = comment.unwrap_or_else(|| {
+                let user = std::env::var("USER")
+                    .or_else(|_| std::env::var("USERNAME"))
+                    .unwrap_or_else(|_| "user".to_string());
+                let hostname = get_hostname();
+                format!("{}@{}", user, hostname)
+            });
+
+            spinner.set_message("Generating SSH key pair...");
+            spinner.enable_steady_tick(Duration::from_millis(80));
+
+            let key_pair = SshKeyPair::generate(algorithm, &key_comment)?;
+            (key_pair, false, None)
+        };
 
     spinner.set_message("Connecting and exchanging keys...");
 
@@ -75,23 +110,35 @@ pub async fn run(target: String, comment: Option<String>, rsa: bool) -> Result<(
             success("Pairing successful!");
             println!();
 
-            // Save the key locally
-            let key_manager = KeyManager::new()?;
-            let key_name = format!("connecto_{}", sanitize_name(&pairing_result.server_name));
-            let (private_path, public_path) = key_manager.save_key_pair(&key_pair, &key_name)?;
+            // Determine the key path to use in SSH config
+            let private_path = if using_existing_key {
+                // Use the existing key path
+                let path = existing_key_path.unwrap();
+                println!("{}", "Using existing key:".bold());
+                println!("  {} {}", "•".green(), path.dimmed());
+                println!();
+                PathBuf::from(path)
+            } else {
+                // Save the new key locally
+                let key_manager = KeyManager::new()?;
+                let key_name = format!("connecto_{}", sanitize_name(&pairing_result.server_name));
+                let (private_path, public_path) =
+                    key_manager.save_key_pair(&key_pair, &key_name)?;
 
-            println!("{}", "Key saved:".bold());
-            println!(
-                "  {} Private: {}",
-                "•".green(),
-                private_path.display().to_string().dimmed()
-            );
-            println!(
-                "  {} Public:  {}",
-                "•".green(),
-                public_path.display().to_string().dimmed()
-            );
-            println!();
+                println!("{}", "Key saved:".bold());
+                println!(
+                    "  {} Private: {}",
+                    "•".green(),
+                    private_path.display().to_string().dimmed()
+                );
+                println!(
+                    "  {} Public:  {}",
+                    "•".green(),
+                    public_path.display().to_string().dimmed()
+                );
+                println!();
+                private_path
+            };
 
             // Auto-configure SSH config
             let primary_ip = extract_ip_from_address(&address);
@@ -200,6 +247,18 @@ fn sanitize_name(name: &str) -> String {
 
 fn extract_ip_from_address(address: &str) -> String {
     address.split(':').next().unwrap_or(address).to_string()
+}
+
+/// Expand ~ to home directory in path
+fn expand_path(path: &str) -> Result<String> {
+    if path.starts_with("~/") {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .map_err(|_| anyhow!("HOME/USERPROFILE not set"))?;
+        Ok(path.replacen("~", &home, 1))
+    } else {
+        Ok(path.to_string())
+    }
 }
 
 /// Add a host entry to ~/.ssh/config
