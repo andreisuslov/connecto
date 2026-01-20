@@ -11,9 +11,9 @@ mod commands;
 mod state;
 
 use commands::{
-    generate_key_pair, get_addresses, get_device_name, get_listener_status,
-    list_authorized_keys, list_paired_hosts, pair_with_address, pair_with_device,
-    remove_authorized_key, scan_devices, start_listener, stop_listener,
+    generate_key_pair, get_addresses, get_device_name, get_listener_status, list_authorized_keys,
+    list_paired_hosts, pair_with_address, pair_with_device, remove_authorized_key, scan_devices,
+    start_listener, stop_listener,
 };
 use state::AppState;
 use tracing_subscriber::EnvFilter;

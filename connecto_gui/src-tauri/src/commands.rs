@@ -1,7 +1,9 @@
 //! Tauri commands for the GUI
 
 use connecto_core::{
-    discovery::{get_hostname, get_local_addresses, DiscoveredDevice, ServiceAdvertiser, ServiceBrowser},
+    discovery::{
+        get_hostname, get_local_addresses, DiscoveredDevice, ServiceAdvertiser, ServiceBrowser,
+    },
     keys::{KeyAlgorithm, KeyManager, SshKeyPair},
     protocol::{HandshakeClient, HandshakeServer, ServerEvent},
     DEFAULT_PORT,
@@ -286,7 +288,9 @@ pub async fn get_listener_status(state: State<'_, AppState>) -> Result<bool, Str
 #[tauri::command]
 pub fn list_authorized_keys() -> Result<Vec<String>, String> {
     let key_manager = KeyManager::new().map_err(|e| e.to_string())?;
-    key_manager.list_authorized_keys().map_err(|e| e.to_string())
+    key_manager
+        .list_authorized_keys()
+        .map_err(|e| e.to_string())
 }
 
 /// Remove an authorized key
