@@ -966,10 +966,12 @@ mod tests {
                 target,
                 comment,
                 rsa,
+                key,
             } => {
                 assert_eq!(target, "1");
                 assert!(comment.is_none());
                 assert!(!rsa);
+                assert!(key.is_none());
             }
             _ => panic!("Expected Pair command"),
         }
