@@ -4,7 +4,14 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/app
 import { Button } from '@/app/components/ui/button';
 import { Input } from '@/app/components/ui/input';
 import { Badge } from '@/app/components/ui/badge';
-import { Wifi, Loader2, CheckCircle2, Monitor, Server, Copy, Link2 } from 'lucide-react';
+import { Checkbox } from '@/app/components/ui/checkbox';
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/app/components/ui/accordion";
+import { Wifi, Loader2, CheckCircle2, Monitor, Copy, Link2, RefreshCw, StopCircle, XCircle } from 'lucide-react';
 import { toast } from 'sonner';
 
 interface DeviceInfo {
@@ -25,6 +32,15 @@ interface PairingResult {
   error?: string;
 }
 
+interface SyncResult {
+  success: boolean;
+  peer_name: string;
+  peer_user: string;
+  peer_address: string;
+  ssh_command: string;
+  error: string | null;
+}
+
 interface PairedHost {
   host: string;
   hostname: string;
@@ -40,6 +56,12 @@ export function ScanAndPairTab() {
   const [pairedIndices, setPairedIndices] = useState<Set<number>>(new Set());
   const [pairingResult, setPairingResult] = useState<PairingResult | null>(null);
   const [pairedHosts, setPairedHosts] = useState<PairedHost[]>([]);
+
+  // Sync state
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncTimeout, setSyncTimeout] = useState('60');
+  const [syncUseRsa, setSyncUseRsa] = useState(false);
+  const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
 
   // Load paired hosts on mount
   useEffect(() => {
@@ -88,7 +110,7 @@ export function ScanAndPairTab() {
       if (result.success) {
         setPairedIndices(prev => new Set(prev).add(device.index));
         setPairingResult(result);
-        loadPairedHosts(); // Refresh paired hosts list
+        loadPairedHosts();
         toast.success(`Successfully paired with ${result.server_name}!`, { id: 'pairing' });
       } else {
         toast.error(`Pairing failed: ${result.error}`, { id: 'pairing' });
@@ -122,7 +144,7 @@ export function ScanAndPairTab() {
 
       if (result.success) {
         setPairingResult(result);
-        loadPairedHosts(); // Refresh paired hosts list
+        loadPairedHosts();
         toast.success(`Successfully paired!`, { id: 'manual' });
         setManualIp('');
       } else {
@@ -130,6 +152,44 @@ export function ScanAndPairTab() {
       }
     } catch (error) {
       toast.error(`Connection failed: ${error}`, { id: 'manual' });
+    }
+  };
+
+  const handleStartSync = async () => {
+    setIsSyncing(true);
+    setSyncResult(null);
+    toast.loading('Starting sync - waiting for peer...', { id: 'sync' });
+
+    try {
+      const result = await invoke<SyncResult>('start_sync', {
+        port: 8099,
+        deviceName: null,
+        timeoutSecs: Number.parseInt(syncTimeout, 10),
+        useRsa: syncUseRsa
+      });
+
+      setSyncResult(result);
+
+      if (result.success) {
+        toast.success(`Synced with ${result.peer_name}!`, { id: 'sync' });
+        loadPairedHosts();
+      } else {
+        toast.error(`Sync failed: ${result.error}`, { id: 'sync' });
+      }
+    } catch (error) {
+      toast.error(`Sync error: ${error}`, { id: 'sync' });
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const handleCancelSync = async () => {
+    try {
+      await invoke('cancel_sync');
+      setIsSyncing(false);
+      toast.info('Sync cancelled', { id: 'sync' });
+    } catch (error) {
+      toast.error(`Failed to cancel sync: ${error}`);
     }
   };
 
@@ -266,22 +326,144 @@ export function ScanAndPairTab() {
         </Card>
       )}
 
-      {/* Manual connect */}
+      {/* Manual connect and Sync */}
       <Card>
         <CardHeader>
-          <CardTitle>Manual connect</CardTitle>
-          <CardDescription>Enter IP:port directly if mDNS doesn't find the device</CardDescription>
+          <CardTitle>Additional options</CardTitle>
+          <CardDescription>Manual connections and bidirectional sync</CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="flex gap-2">
-            <Input
-              placeholder="192.168.1.100:8099"
-              value={manualIp}
-              onChange={(e) => setManualIp(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleManualConnect()}
-            />
-            <Button onClick={handleManualConnect}>Connect</Button>
-          </div>
+          <Accordion type="single" collapsible className="w-full">
+            <AccordionItem value="manual">
+              <AccordionTrigger>
+                <div className="flex items-center gap-2">
+                  <Link2 className="size-4" />
+                  Manual connect
+                </div>
+              </AccordionTrigger>
+              <AccordionContent>
+                <p className="text-sm text-muted-foreground mb-4">
+                  Enter IP:port directly if mDNS doesn't find the device
+                </p>
+                <div className="flex gap-2">
+                  <Input
+                    placeholder="192.168.1.100:8099"
+                    value={manualIp}
+                    onChange={(e) => setManualIp(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleManualConnect()}
+                  />
+                  <Button onClick={handleManualConnect}>Connect</Button>
+                </div>
+              </AccordionContent>
+            </AccordionItem>
+
+            <AccordionItem value="sync">
+              <AccordionTrigger>
+                <div className="flex items-center gap-2">
+                  <RefreshCw className="size-4" />
+                  Bidirectional sync
+                </div>
+              </AccordionTrigger>
+              <AccordionContent>
+                <p className="text-sm text-muted-foreground mb-4">
+                  Run sync on both devices simultaneously. After sync, both can SSH to each other.
+                </p>
+
+                {/* Sync status */}
+                {isSyncing && (
+                  <div className="mb-4 p-4 bg-purple-50 border border-purple-200 rounded-lg">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <RefreshCw className="size-5 text-purple-600 animate-spin" />
+                        <div>
+                          <p className="font-medium text-purple-900">Syncing...</p>
+                          <p className="text-sm text-purple-700">Waiting for peer on network</p>
+                        </div>
+                      </div>
+                      <Button variant="destructive" size="sm" onClick={handleCancelSync}>
+                        <StopCircle className="mr-2 size-4" />
+                        Cancel
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Sync result */}
+                {syncResult && !isSyncing && (
+                  <div className={`mb-4 p-4 rounded-lg border ${syncResult.success ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
+                    <div className="flex items-center gap-3">
+                      {syncResult.success ? (
+                        <CheckCircle2 className="size-5 text-green-600" />
+                      ) : (
+                        <XCircle className="size-5 text-red-600" />
+                      )}
+                      <div className="flex-1">
+                        <p className={`font-medium ${syncResult.success ? 'text-green-900' : 'text-red-900'}`}>
+                          {syncResult.success ? `Synced with ${syncResult.peer_name}` : 'Sync failed'}
+                        </p>
+                        {syncResult.success ? (
+                          <p className="text-sm text-green-700">
+                            Bidirectional SSH access with {syncResult.peer_user}@{syncResult.peer_address}
+                          </p>
+                        ) : (
+                          <p className="text-sm text-red-700">{syncResult.error}</p>
+                        )}
+                      </div>
+                      {syncResult.success && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => copyToClipboard(syncResult.ssh_command)}
+                        >
+                          <Copy className="mr-2 size-3" />
+                          Copy SSH
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                <div className="space-y-4">
+                  <div className="flex items-center gap-4">
+                    <div className="flex-1">
+                      <label htmlFor="syncTimeout" className="text-sm font-medium mb-2 block">
+                        Timeout (seconds)
+                      </label>
+                      <Input
+                        id="syncTimeout"
+                        type="number"
+                        value={syncTimeout}
+                        onChange={(e) => setSyncTimeout(e.target.value)}
+                        disabled={isSyncing}
+                        className="w-32"
+                      />
+                    </div>
+                    <div className="flex items-center space-x-2 pt-6">
+                      <Checkbox
+                        id="syncUseRsa"
+                        checked={syncUseRsa}
+                        onCheckedChange={(checked) => setSyncUseRsa(checked as boolean)}
+                        disabled={isSyncing}
+                      />
+                      <label
+                        htmlFor="syncUseRsa"
+                        className="text-sm font-medium leading-none"
+                      >
+                        Use RSA-4096
+                      </label>
+                    </div>
+                  </div>
+
+                  {!isSyncing && (
+                    <Button onClick={handleStartSync} className="w-full bg-purple-600 hover:bg-purple-700">
+                      <RefreshCw className="mr-2 size-4" />
+                      Start Sync
+                    </Button>
+                  )}
+                </div>
+              </AccordionContent>
+            </AccordionItem>
+          </Accordion>
         </CardContent>
       </Card>
 
