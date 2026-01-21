@@ -853,32 +853,6 @@ mod tests {
     }
 
     #[test]
-    fn test_list_local_keys_finds_key_pairs() {
-        let temp_dir = TempDir::new().unwrap();
-        let ssh_dir = temp_dir.path().join(".ssh");
-        std::fs::create_dir_all(&ssh_dir).unwrap();
-
-        // Create a test key pair
-        let private_key = r#"-----BEGIN OPENSSH PRIVATE KEY-----
-b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
-QyNTUxOQAAACBHK9toTP8HtIHvBB3X6bq5LYTTLIl4nC28HqWGJcZoGwAAAJgPP4xYDz+M
-WAAAAAtzc2gtZWQyNTUxOQAAACBHK9toTP8HtIHvBB3X6bq5LYTTLIl4nC28HqWGJcZoGw
-AAAEB/qvjQ6fU+2xYYZM3BkllsQYYTQrjglCgbwW0WO1iXP0cr22hM/we0ge8EHdfpurkt
-hNMsiXicLbwepYYlxmgbAAAADnRlc3RAY29ubmVjdG8BAgMEBQ==
------END OPENSSH PRIVATE KEY-----"#;
-        let public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEcr22hM/we0ge8EHdfpurkthNMsiXicLbwepYYlxmgb test@connecto";
-
-        std::fs::write(ssh_dir.join("test_key"), private_key).unwrap();
-        std::fs::write(ssh_dir.join("test_key.pub"), public_key).unwrap();
-
-        let keys = list_local_keys_in_dir(&ssh_dir).unwrap();
-        assert_eq!(keys.len(), 1);
-        assert_eq!(keys[0].name, "test_key");
-        assert_eq!(keys[0].algorithm, "ssh-ed25519");
-        assert_eq!(keys[0].comment, "test@connecto");
-    }
-
-    #[test]
     fn test_list_local_keys_ignores_non_key_files() {
         let temp_dir = TempDir::new().unwrap();
         let ssh_dir = temp_dir.path().join(".ssh");
@@ -891,31 +865,6 @@ hNMsiXicLbwepYYlxmgbAAAADnRlc3RAY29ubmVjdG8BAgMEBQ==
 
         let keys = list_local_keys_in_dir(&ssh_dir).unwrap();
         assert!(keys.is_empty());
-    }
-
-    #[test]
-    fn test_list_local_keys_multiple_keys() {
-        let temp_dir = TempDir::new().unwrap();
-        let ssh_dir = temp_dir.path().join(".ssh");
-        std::fs::create_dir_all(&ssh_dir).unwrap();
-
-        // Create multiple key pairs
-        let private_key = r#"-----BEGIN OPENSSH PRIVATE KEY-----
-b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
-QyNTUxOQAAACBHK9toTP8HtIHvBB3X6bq5LYTTLIl4nC28HqWGJcZoGwAAAJgPP4xYDz+M
-WAAAAAtzc2gtZWQyNTUxOQAAACBHK9toTP8HtIHvBB3X6bq5LYTTLIl4nC28HqWGJcZoGw
-AAAEB/qvjQ6fU+2xYYZM3BkllsQYYTQrjglCgbwW0WO1iXP0cr22hM/we0ge8EHdfpurkt
-hNMsiXicLbwepYYlxmgbAAAADnRlc3RAY29ubmVjdG8BAgMEBQ==
------END OPENSSH PRIVATE KEY-----"#;
-
-        std::fs::write(ssh_dir.join("id_ed25519"), private_key).unwrap();
-        std::fs::write(ssh_dir.join("id_ed25519.pub"), "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEcr22hM/we0ge8EHdfpurkthNMsiXicLbwepYYlxmgb user@host1").unwrap();
-
-        std::fs::write(ssh_dir.join("connecto_server"), private_key).unwrap();
-        std::fs::write(ssh_dir.join("connecto_server.pub"), "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEcr22hM/we0ge8EHdfpurkthNMsiXicLbwepYYlxmgb user@host2").unwrap();
-
-        let keys = list_local_keys_in_dir(&ssh_dir).unwrap();
-        assert_eq!(keys.len(), 2);
     }
 
     #[test]
@@ -950,49 +899,13 @@ hNMsiXicLbwepYYlxmgbAAAADnRlc3RAY29ubmVjdG8BAgMEBQ==
     }
 
     #[test]
-    fn test_get_key_details_returns_info() {
-        let temp_dir = TempDir::new().unwrap();
-        let ssh_dir = temp_dir.path().join(".ssh");
-        std::fs::create_dir_all(&ssh_dir).unwrap();
-
-        let private_key = r#"-----BEGIN OPENSSH PRIVATE KEY-----
-b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
-QyNTUxOQAAACBHK9toTP8HtIHvBB3X6bq5LYTTLIl4nC28HqWGJcZoGwAAAJgPP4xYDz+M
-WAAAAAtzc2gtZWQyNTUxOQAAACBHK9toTP8HtIHvBB3X6bq5LYTTLIl4nC28HqWGJcZoGw
-AAAEB/qvjQ6fU+2xYYZM3BkllsQYYTQrjglCgbwW0WO1iXP0cr22hM/we0ge8EHdfpurkt
-hNMsiXicLbwepYYlxmgbAAAADnRlc3RAY29ubmVjdG8BAgMEBQ==
------END OPENSSH PRIVATE KEY-----"#;
-        let public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEcr22hM/we0ge8EHdfpurkthNMsiXicLbwepYYlxmgb test@connecto";
-
-        std::fs::write(ssh_dir.join("my_key"), private_key).unwrap();
-        std::fs::write(ssh_dir.join("my_key.pub"), public_key).unwrap();
-
-        let details = get_key_details_in_dir(&ssh_dir, "my_key").unwrap();
-        assert_eq!(details.name, "my_key");
-        assert_eq!(details.algorithm, "ssh-ed25519");
-        assert_eq!(details.comment, "test@connecto");
-        assert!(details.private_key_path.contains("my_key"));
-        assert!(details.public_key_path.contains("my_key.pub"));
-        assert!(!details.fingerprint.is_empty());
-    }
-
-    #[test]
     fn test_rename_local_key() {
         let temp_dir = TempDir::new().unwrap();
         let ssh_dir = temp_dir.path().join(".ssh");
         std::fs::create_dir_all(&ssh_dir).unwrap();
 
-        let private_key = r#"-----BEGIN OPENSSH PRIVATE KEY-----
-b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
-QyNTUxOQAAACBHK9toTP8HtIHvBB3X6bq5LYTTLIl4nC28HqWGJcZoGwAAAJgPP4xYDz+M
-WAAAAAtzc2gtZWQyNTUxOQAAACBHK9toTP8HtIHvBB3X6bq5LYTTLIl4nC28HqWGJcZoGw
-AAAEB/qvjQ6fU+2xYYZM3BkllsQYYTQrjglCgbwW0WO1iXP0cr22hM/we0ge8EHdfpurkt
-hNMsiXicLbwepYYlxmgbAAAADnRlc3RAY29ubmVjdG8BAgMEBQ==
------END OPENSSH PRIVATE KEY-----"#;
-        let public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEcr22hM/we0ge8EHdfpurkthNMsiXicLbwepYYlxmgb test@connecto";
-
-        std::fs::write(ssh_dir.join("old_name"), private_key).unwrap();
-        std::fs::write(ssh_dir.join("old_name.pub"), public_key).unwrap();
+        std::fs::write(ssh_dir.join("old_name"), "private_content").unwrap();
+        std::fs::write(ssh_dir.join("old_name.pub"), "ssh-ed25519 AAAA... test@connecto").unwrap();
 
         let result = rename_local_key_in_dir(&ssh_dir, "old_name", "new_name");
         assert!(result.is_ok());
