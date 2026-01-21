@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "connecto_cli"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -489,10 +489,11 @@ dependencies = [
 
 [[package]]
 name = "connecto_core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "directories",
+ "flume",
  "futures",
  "hostname",
  "local-ip-address",
@@ -510,7 +511,7 @@ dependencies = [
 
 [[package]]
 name = "connecto_gui"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "connecto_core",
  "serde",
@@ -1172,6 +1173,7 @@ checksum = "da0e4dd2a88388a1f4ccc7c9ce104604dab68d9f408dc34cd45823d5a9069095"
 dependencies = [
  "futures-core",
  "futures-sink",
+ "nanorand",
  "spin",
 ]
 
@@ -1447,8 +1449,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "wasi 0.11.1+wasi-snapshot-preview1",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -2289,6 +2293,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.114",
+]
+
+[[package]]
+name = "nanorand"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a51313c5820b0b02bd422f4b44776fbf47961755c74ce64afc73bfad10226c3"
+dependencies = [
+ "getrandom 0.2.17",
 ]
 
 [[package]]

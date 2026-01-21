@@ -52,6 +52,7 @@ pub mod discovery;
 pub mod error;
 pub mod keys;
 pub mod protocol;
+pub mod sync;
 
 // Re-export commonly used types
 pub use discovery::{
@@ -63,6 +64,7 @@ pub use keys::{KeyAlgorithm, KeyManager, SshKeyPair};
 pub use protocol::{
     HandshakeClient, HandshakeServer, Message, PairingResult, ServerEvent, PROTOCOL_VERSION,
 };
+pub use sync::{SyncEvent, SyncHandler, SyncResult, DEFAULT_SYNC_TIMEOUT_SECS, SYNC_SERVICE_TYPE};
 
 /// Get the version of the connecto_core library
 pub fn version() -> &'static str {
@@ -97,5 +99,7 @@ mod tests {
         let _ = SERVICE_TYPE;
         let _ = PROTOCOL_VERSION;
         let _ = KeyAlgorithm::default();
+        let _ = SYNC_SERVICE_TYPE;
+        let _ = DEFAULT_SYNC_TIMEOUT_SECS;
     }
 }
