@@ -461,7 +461,7 @@ fn get_ssh_dir() -> Result<std::path::PathBuf, String> {
 
 /// Parse public key to extract algorithm, comment, and fingerprint
 fn parse_public_key_info(public_key_content: &str) -> (String, String, String) {
-    let parts: Vec<&str> = public_key_content.trim().split_whitespace().collect();
+    let parts: Vec<&str> = public_key_content.split_whitespace().collect();
 
     let algorithm = parts.first().unwrap_or(&"unknown").to_string();
     let comment = if parts.len() > 2 {
@@ -858,7 +858,7 @@ mod tests {
         let ssh_dir = temp_dir.path().join(".ssh");
         std::fs::create_dir_all(&ssh_dir).unwrap();
 
-        // Create a mock key pair
+        // Create a test key pair
         let private_key = r#"-----BEGIN OPENSSH PRIVATE KEY-----
 b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
 QyNTUxOQAAACBHK9toTP8HtIHvBB3X6bq5LYTTLIl4nC28HqWGJcZoGwAAAJgPP4xYDz+M
