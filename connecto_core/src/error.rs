@@ -40,6 +40,15 @@ pub enum ConnectoError {
 
     #[error("Authorization file error: {0}")]
     AuthorizedKeys(String),
+
+    #[error("Sync error: {0}")]
+    Sync(String),
+
+    #[error("Sync rejected: {0}")]
+    SyncRejected(String),
+
+    #[error("Sync with self: cannot sync a device with itself")]
+    SyncWithSelf,
 }
 
 pub type Result<T> = std::result::Result<T, ConnectoError>;
@@ -68,5 +77,26 @@ mod tests {
 
         let err_result: Result<i32> = Err(ConnectoError::Timeout("test".to_string()));
         assert!(err_result.is_err());
+    }
+
+    #[test]
+    fn test_sync_error_display() {
+        let err = ConnectoError::Sync("connection failed".to_string());
+        assert_eq!(err.to_string(), "Sync error: connection failed");
+    }
+
+    #[test]
+    fn test_sync_rejected_error_display() {
+        let err = ConnectoError::SyncRejected("peer declined".to_string());
+        assert_eq!(err.to_string(), "Sync rejected: peer declined");
+    }
+
+    #[test]
+    fn test_sync_with_self_error_display() {
+        let err = ConnectoError::SyncWithSelf;
+        assert_eq!(
+            err.to_string(),
+            "Sync with self: cannot sync a device with itself"
+        );
     }
 }

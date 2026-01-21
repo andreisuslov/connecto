@@ -100,9 +100,22 @@ That's it! The listener exits automatically after successful pairing.
    - Listener added it to `~/.ssh/authorized_keys`
    - Client saved the private key and updated `~/.ssh/config`
 
+## Alternative: Bidirectional sync
+
+If you want **both** devices to be able to SSH to each other, use `sync` instead:
+
+```bash
+# Run on BOTH devices at the same time
+connecto sync
+```
+
+This exchanges keys bidirectionally - after sync completes, both devices can SSH to each other.
+See [sync command](../commands/sync.md) for details.
+
 ## Next steps
 
 - [List paired hosts](../commands/hosts.md): `connecto hosts`
 - [Test connection](../commands/test.md): `connecto test mydesktop`
 - [Update IP](../commands/update-ip.md): `connecto update-ip mydesktop 10.0.0.5`
 - [Remove pairing](../commands/unpair.md): `connecto unpair mydesktop`
+- [Bidirectional sync](../commands/sync.md): `connecto sync`
