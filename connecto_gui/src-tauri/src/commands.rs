@@ -905,7 +905,11 @@ mod tests {
         std::fs::create_dir_all(&ssh_dir).unwrap();
 
         std::fs::write(ssh_dir.join("old_name"), "private_content").unwrap();
-        std::fs::write(ssh_dir.join("old_name.pub"), "ssh-ed25519 AAAA... test@connecto").unwrap();
+        std::fs::write(
+            ssh_dir.join("old_name.pub"),
+            "ssh-ed25519 AAAA... test@connecto",
+        )
+        .unwrap();
 
         let result = rename_local_key_in_dir(&ssh_dir, "old_name", "new_name");
         assert!(result.is_ok());
