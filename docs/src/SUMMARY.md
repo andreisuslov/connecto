@@ -13,6 +13,7 @@
 - [listen](./commands/listen.md)
 - [scan](./commands/scan.md)
 - [pair](./commands/pair.md)
+- [sync](./commands/sync.md)
 - [hosts](./commands/hosts.md)
 - [unpair](./commands/unpair.md)
 - [test](./commands/test.md)

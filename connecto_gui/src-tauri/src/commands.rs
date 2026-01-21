@@ -6,6 +6,7 @@ use connecto_core::{
     },
     keys::{KeyAlgorithm, KeyManager, SshKeyPair},
     protocol::{HandshakeClient, HandshakeServer},
+    sync::SyncHandler,
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -806,6 +807,175 @@ pub fn get_key_details(name: String) -> Result<LocalKeyInfo, String> {
 pub fn rename_local_key(old_name: String, new_name: String) -> Result<(), String> {
     let ssh_dir = get_ssh_dir()?;
     rename_local_key_in_dir(&ssh_dir, &old_name, &new_name)
+}
+
+// ============================================================================
+// Sync commands
+// ============================================================================
+
+/// Sync result for the frontend
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncResultInfo {
+    pub success: bool,
+    pub peer_name: String,
+    pub peer_user: String,
+    pub peer_address: String,
+    pub ssh_command: String,
+    pub error: Option<String>,
+}
+
+/// Sync status for the frontend
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncStatusInfo {
+    pub is_syncing: bool,
+    pub status_message: String,
+    pub peer_name: Option<String>,
+}
+
+/// Start sync operation
+#[tauri::command]
+pub async fn start_sync(
+    port: u16,
+    device_name: Option<String>,
+    timeout_secs: u64,
+    use_rsa: bool,
+    state: State<'_, AppState>,
+) -> Result<SyncResultInfo, String> {
+    use tokio::sync::mpsc;
+
+    let name = device_name.unwrap_or_else(get_hostname);
+
+    // Check if already syncing
+    {
+        let status = state.sync_status.lock().await;
+        if status.is_syncing {
+            return Err("Sync operation already in progress".to_string());
+        }
+    }
+
+    // Update status to syncing
+    {
+        let mut status = state.sync_status.lock().await;
+        status.is_syncing = true;
+        status.status_message = "Starting sync...".to_string();
+        status.peer_name = None;
+    }
+
+    // Generate key pair
+    let algorithm = if use_rsa {
+        KeyAlgorithm::Rsa4096
+    } else {
+        KeyAlgorithm::Ed25519
+    };
+
+    let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+    let comment = format!("{}@{}", user, name);
+    let key_pair = SshKeyPair::generate(algorithm, &comment).map_err(|e| e.to_string())?;
+
+    // Save the key
+    let key_manager = KeyManager::new().map_err(|e| e.to_string())?;
+    let key_name = format!(
+        "connecto_sync_{}",
+        name.chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect::<String>()
+            .to_lowercase()
+    );
+    let (private_path, _) = key_manager
+        .save_key_pair(&key_pair, &key_name)
+        .map_err(|e| e.to_string())?;
+
+    // Create sync handler
+    let sync_key_manager = KeyManager::new().map_err(|e| e.to_string())?;
+    let handler = SyncHandler::new(sync_key_manager, &name, key_pair.clone());
+
+    // Create event channel (events are logged but not stored in state to avoid lifetime issues)
+    let (event_tx, mut event_rx) = mpsc::channel(10);
+
+    // Spawn a task to drain events (they're logged in the handler)
+    tokio::spawn(async move {
+        while event_rx.recv().await.is_some() {
+            // Events are handled in SyncHandler, we just drain them here
+        }
+    });
+
+    // Run sync
+    let result = handler.run(port, timeout_secs, event_tx).await;
+
+    // Update status
+    {
+        let mut status = state.sync_status.lock().await;
+        status.is_syncing = false;
+    }
+
+    match result {
+        Ok(sync_result) => {
+            let ssh_command = format!(
+                "ssh -i {} {}@{}",
+                private_path.display(),
+                sync_result.peer_user,
+                sync_result.peer_address
+            );
+
+            // Update status with success
+            {
+                let mut status = state.sync_status.lock().await;
+                status.status_message = format!("Sync completed with {}!", sync_result.peer_name);
+                status.peer_name = Some(sync_result.peer_name.clone());
+            }
+
+            Ok(SyncResultInfo {
+                success: true,
+                peer_name: sync_result.peer_name,
+                peer_user: sync_result.peer_user,
+                peer_address: sync_result.peer_address.to_string(),
+                ssh_command,
+                error: None,
+            })
+        }
+        Err(e) => {
+            // Update status with failure
+            {
+                let mut status = state.sync_status.lock().await;
+                status.status_message = format!("Sync failed: {}", e);
+            }
+
+            Ok(SyncResultInfo {
+                success: false,
+                peer_name: String::new(),
+                peer_user: String::new(),
+                peer_address: String::new(),
+                ssh_command: String::new(),
+                error: Some(e.to_string()),
+            })
+        }
+    }
+}
+
+/// Get sync status
+#[tauri::command]
+pub async fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatusInfo, String> {
+    let status = state.sync_status.lock().await;
+    Ok(SyncStatusInfo {
+        is_syncing: status.is_syncing,
+        status_message: status.status_message.clone(),
+        peer_name: status.peer_name.clone(),
+    })
+}
+
+/// Cancel sync operation
+#[tauri::command]
+pub async fn cancel_sync(state: State<'_, AppState>) -> Result<(), String> {
+    {
+        let mut cancel = state.sync_cancel.lock().await;
+        *cancel = true;
+    }
+    {
+        let mut status = state.sync_status.lock().await;
+        status.is_syncing = false;
+        status.status_message = "Sync cancelled".to_string();
+    }
+    Ok(())
 }
 
 #[cfg(test)]

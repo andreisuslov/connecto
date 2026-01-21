@@ -11,10 +11,10 @@ mod commands;
 mod state;
 
 use commands::{
-    delete_local_key, generate_key_pair, get_addresses, get_device_name, get_key_details,
-    get_listener_status, list_authorized_keys, list_local_keys, list_paired_hosts,
-    pair_with_address, pair_with_device, remove_authorized_key, rename_local_key, scan_devices,
-    start_listener, stop_listener,
+    cancel_sync, delete_local_key, generate_key_pair, get_addresses, get_device_name,
+    get_key_details, get_listener_status, get_sync_status, list_authorized_keys, list_local_keys,
+    list_paired_hosts, pair_with_address, pair_with_device, remove_authorized_key,
+    rename_local_key, scan_devices, start_listener, start_sync, stop_listener,
 };
 use state::AppState;
 use tracing_subscriber::EnvFilter;
@@ -44,6 +44,9 @@ fn main() {
             delete_local_key,
             get_key_details,
             rename_local_key,
+            start_sync,
+            get_sync_status,
+            cancel_sync,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
