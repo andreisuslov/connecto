@@ -1,3 +1,17 @@
 @import './fonts.css';
 @import './tailwind.css';
 @import './theme.css';
+
+html, body {
+  overflow-x: hidden;
+  overscroll-behavior-x: none;
+}
+
+/* Overscroll background colors */
+html {
+  background-color: #f8fafc; /* slate-50 - matches top of gradient */
+}
+
+body {
+  background-color: #f1f5f9; /* slate-100 - matches bottom of gradient */
+}

@@ -2,7 +2,7 @@
 
 When devices are on different subnets (common with VPNs), mDNS discovery won't work across subnets. Connecto provides a simple solution: save the remote subnet once, and scans will include it automatically.
 
-## The Problem
+## The problem
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -20,9 +20,9 @@ When devices are on different subnets (common with VPNs), mDNS discovery won't w
 
 mDNS broadcasts don't cross subnet boundaries, so `connecto scan` won't find devices on other subnets.
 
-## The Solution
+## The solution
 
-### Step 1: Find the Remote Subnet
+### Step 1: Find the remote subnet
 
 Ask your colleague or check your VPN documentation for the subnet. Common formats:
 - `10.0.2.0/24` (256 addresses)
@@ -66,9 +66,9 @@ Pair as usual:
 connecto pair 0
 ```
 
-## Managing Subnets
+## Managing subnets
 
-### List Saved Subnets
+### List saved subnets
 
 ```bash
 connecto config list
@@ -80,13 +80,13 @@ Configured subnets:
   • 10.0.3.0/24
 ```
 
-### Remove a Subnet
+### Remove a subnet
 
 ```bash
 connecto config remove-subnet 10.0.3.0/24
 ```
 
-### Config File Location
+### Config file location
 
 ```bash
 connecto config path
@@ -96,7 +96,7 @@ The config file is stored at:
 - **macOS/Linux**: `~/.config/connecto/config.json`
 - **Windows**: `%APPDATA%\connecto\config.json`
 
-## One-Time Subnet Scan
+## One-time subnet scan
 
 If you don't want to save a subnet permanently, use the `--subnet` flag:
 
@@ -110,7 +110,7 @@ You can specify multiple subnets:
 connecto scan -s 10.0.2.0/24 -s 10.0.3.0/24
 ```
 
-## Listener VPN Hint
+## Listener VPN hint
 
 When someone pairs from a different subnet, the listener shows a helpful message:
 
@@ -123,7 +123,7 @@ VPN/Cross-subnet connection detected!
     connecto config add-subnet 10.0.1.0/24
 ```
 
-## Direct Pairing
+## Direct pairing
 
 If you know the exact IP, skip scanning entirely:
 

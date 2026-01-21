@@ -10,7 +10,7 @@ Connecto can be installed on macOS, Linux, and Windows.
 brew install andreisuslov/connecto/connecto
 ```
 
-### Binary Download
+### Binary download
 
 Download the latest release from [GitHub Releases](https://github.com/andreisuslov/connecto/releases):
 
@@ -48,7 +48,7 @@ This will:
 choco install connecto
 ```
 
-### Manual Installation
+### Manual installation
 
 1. Download `connecto-x86_64-pc-windows-msvc.zip` from [GitHub Releases](https://github.com/andreisuslov/connecto/releases)
 2. Extract to `C:\Program Files\Connecto`
@@ -56,7 +56,7 @@ choco install connecto
 
 ## Linux
 
-### Binary Download
+### Binary download
 
 ```bash
 # x86_64
@@ -65,7 +65,7 @@ tar xzf connecto-x86_64-unknown-linux-gnu.tar.gz
 sudo mv connecto /usr/local/bin/
 ```
 
-### From Source
+### From source
 
 Requires Rust 1.70+:
 
@@ -75,13 +75,13 @@ cd connecto
 cargo install --path connecto_cli
 ```
 
-## Verify Installation
+## Verify installation
 
 ```bash
 connecto --version
 ```
 
-## Shell Completions
+## Shell completions
 
 Enable tab completion for your shell:
 
@@ -101,7 +101,7 @@ connecto completions powershell >> $PROFILE
 
 Restart your shell or source the config file.
 
-## Firewall Configuration
+## Firewall configuration
 
 Connecto uses:
 - **UDP 5353** for mDNS discovery

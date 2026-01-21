@@ -24,7 +24,7 @@ The `scan` command discovers devices on your network that are running `connecto 
 
 ## Examples
 
-### Basic Scan
+### Basic scan
 
 ```bash
 connecto scan
@@ -44,19 +44,19 @@ Output:
 To pair with a device, run: connecto pair <number>
 ```
 
-### Scan Additional Subnet
+### Scan additional subnet
 
 ```bash
 connecto scan --subnet 10.0.2.0/24
 ```
 
-### Scan Multiple Subnets
+### Scan multiple subnets
 
 ```bash
 connecto scan -s 10.0.2.0/24 -s 10.0.3.0/24
 ```
 
-## Discovery Methods
+## Discovery methods
 
 ### mDNS Discovery
 
@@ -66,7 +66,7 @@ mDNS (multicast DNS) automatically finds devices on the same subnet. No configur
 - Only works within the same subnet
 - May be blocked by some network configurations
 
-### Subnet Scanning
+### Subnet scanning
 
 For VPN or cross-subnet scenarios, Connecto scans IP ranges directly.
 
@@ -81,7 +81,7 @@ connecto scan  # Now includes 10.0.2.0/24
 connecto scan --subnet 10.0.2.0/24
 ```
 
-## Scan Performance
+## Scan performance
 
 | Subnet Size | IPs | Approximate Time |
 |-------------|-----|------------------|
@@ -91,7 +91,7 @@ connecto scan --subnet 10.0.2.0/24
 
 Connecto scans up to 100 IPs concurrently with a 500ms timeout per IP.
 
-## No Devices Found?
+## No devices found?
 
 If no devices are found:
 

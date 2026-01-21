@@ -2,7 +2,7 @@
 
 Common issues and solutions.
 
-## Discovery Issues
+## Discovery issues
 
 ### "No devices found" during scan
 
@@ -47,7 +47,7 @@ Common issues and solutions.
 
 ---
 
-## Pairing Issues
+## Pairing issues
 
 ### "Connection refused"
 
@@ -149,7 +149,7 @@ connecto test <host>
 
 ---
 
-## Platform-Specific Issues
+## Platform-specific issues
 
 ### macOS
 
@@ -219,7 +219,7 @@ sudo ausearch -m avc -ts recent
 
 ---
 
-## Config Issues
+## Config issues
 
 ### Config file corrupted
 
@@ -249,9 +249,9 @@ grep -n "Host <hostname>" ~/.ssh/config
 
 ---
 
-## Getting Help
+## Getting help
 
-### Verbose Output
+### Verbose output
 
 Most commands support verbose mode (planned feature):
 ```bash
@@ -259,7 +259,7 @@ connecto scan -v
 connecto pair -v 0
 ```
 
-### Debug Information
+### Debug information
 
 Collect for bug reports:
 ```bash
@@ -278,7 +278,7 @@ uname -a  # macOS/Linux
 systeminfo | findstr /B /C:"OS"  # Windows
 ```
 
-### Reporting Bugs
+### Reporting bugs
 
 Report issues at: [github.com/andreisuslov/connecto/issues](https://github.com/andreisuslov/connecto/issues)
 

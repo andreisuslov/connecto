@@ -58,7 +58,7 @@ ip addr show | grep inet
 ipconfig
 ```
 
-### Using Connecto Scan
+### Using Connecto scan
 
 If the remote is running `connecto listen`:
 
@@ -74,7 +74,7 @@ The scan results show the current IP.
 - You don't need to re-pair after updating the IP
 - Consider using static IPs or hostnames for frequently-changing devices
 
-## Related Commands
+## Related commands
 
 | Command | Description |
 |---------|-------------|

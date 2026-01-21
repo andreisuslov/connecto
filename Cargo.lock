@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "connecto_cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -489,7 +489,7 @@ dependencies = [
 
 [[package]]
 name = "connecto_core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "directories",
@@ -510,13 +510,14 @@ dependencies = [
 
 [[package]]
 name = "connecto_gui"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "connecto_core",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

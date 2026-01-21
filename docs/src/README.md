@@ -13,7 +13,7 @@ Connecto eliminates the hassle of manual SSH key setup. Instead of copying IP ad
 - **Modern Cryptography** - Uses Ed25519 by default (RSA-4096 also supported)
 - **Cross-platform** - Works on Linux, macOS, and Windows
 
-## How It Works
+## How it works
 
 ```
 ┌─────────────────┐                    ┌─────────────────┐
@@ -36,7 +36,7 @@ Connecto eliminates the hassle of manual SSH key setup. Instead of copying IP ad
 3. **Client** runs `connecto pair 0` - exchanges SSH keys
 4. **Done** - `ssh hostname` just works
 
-## Quick Example
+## Quick example
 
 **On the target machine** (where you want to SSH into):
 
@@ -52,7 +52,7 @@ connecto pair 0
 ssh mydesktop  # It just works!
 ```
 
-## Next Steps
+## Next steps
 
 - [Installation](./getting-started/installation.md) - Install Connecto on your system
 - [Quick Start](./getting-started/quickstart.md) - Get up and running in minutes

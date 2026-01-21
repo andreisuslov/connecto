@@ -75,16 +75,16 @@ Or with just the IP (uses default port 8099):
 connecto pair 192.168.1.55
 ```
 
-## What Gets Created
+## What gets created
 
-### SSH Key Pair
+### SSH key pair
 
 - **Private key**: `~/.ssh/connecto_<hostname>`
 - **Public key**: `~/.ssh/connecto_<hostname>.pub`
 
 Keys use Ed25519 by default (modern, secure, fast).
 
-### SSH Config Entry
+### SSH config entry
 
 An entry is added to `~/.ssh/config`:
 
@@ -112,17 +112,17 @@ This is useful when:
 - You want to refresh the keys
 - The IP address changed
 
-## Using Existing Keys
+## Using existing keys
 
 Instead of generating a new key for each pairing, you can use an existing SSH key.
 
-### One-time Usage
+### One-time usage
 
 ```bash
 connecto pair 0 --key ~/.ssh/id_ed25519
 ```
 
-### Set Default Key
+### Set default key
 
 Set a default key for all future pairings:
 
@@ -132,7 +132,7 @@ connecto config set-default-key ~/.ssh/id_ed25519
 
 Now all `connecto pair` commands will use this key automatically.
 
-### Clear Default Key
+### Clear default key
 
 Return to generating new keys:
 
@@ -140,14 +140,14 @@ Return to generating new keys:
 connecto config clear-default-key
 ```
 
-### Priority Order
+### Priority order
 
 When pairing, Connecto looks for keys in this order:
 1. `--key` flag (if specified)
 2. Config default key (if set)
 3. Generate new key (default behavior)
 
-## After Pairing
+## After pairing
 
 Connect immediately:
 

@@ -58,7 +58,7 @@ export function ListenTab() {
 
     try {
       const status = await invoke<ListenerStatus>('start_listener', {
-        port: parseInt(port),
+        port: Number.parseInt(port, 10),
         deviceName: deviceName || null
       });
 
@@ -90,7 +90,7 @@ export function ListenTab() {
 
   return (
     <div className="space-y-6">
-      {/* Listener Status */}
+      {/* Listener status */}
       {isListening && (
         <Card className="border-green-200 bg-green-50">
           <CardHeader>
@@ -120,7 +120,7 @@ export function ListenTab() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            Listener Configuration
+            Listener configuration
             <TooltipProvider>
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -130,12 +130,12 @@ export function ListenTab() {
                   <p className="max-w-xs">
                     Need help?{' '}
                     <a
-                      href="https://andreisuslov.github.io/connecto/"
+                      href="https://andreisuslov.github.io/connecto/commands/listen.html"
                       target="_blank"
                       rel="noopener noreferrer"
                       className="underline font-medium hover:text-blue-500"
                     >
-                      Read the documentation
+                      See docs
                     </a>
                   </p>
                 </TooltipContent>
@@ -147,17 +147,19 @@ export function ListenTab() {
         <CardContent className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="text-sm font-medium mb-2 block">Device Name</label>
+              <label htmlFor="deviceName" className="text-sm font-medium mb-2 block">Device name</label>
               <Input
+                id="deviceName"
                 value={deviceName}
                 onChange={(e) => setDeviceName(e.target.value)}
-                placeholder="My Computer"
+                placeholder="My computer"
                 disabled={isListening}
               />
             </div>
             <div>
-              <label className="text-sm font-medium mb-2 block">Port</label>
+              <label htmlFor="port" className="text-sm font-medium mb-2 block">Port</label>
               <Input
+                id="port"
                 type="number"
                 value={port}
                 onChange={(e) => setPort(e.target.value)}
@@ -177,7 +179,7 @@ export function ListenTab() {
               ) : (
                 <>
                   <Radio className="mr-2 size-4" />
-                  Start Listening
+                  Start listening
                 </>
               )}
             </Button>
@@ -185,7 +187,7 @@ export function ListenTab() {
         </CardContent>
       </Card>
 
-      {/* Network Information */}
+      {/* Network information */}
       <Card>
         <CardHeader>
           <CardTitle>Your IP Addresses</CardTitle>
@@ -196,9 +198,9 @@ export function ListenTab() {
             <p className="text-gray-500 text-center py-4">No network addresses found</p>
           ) : (
             <div className="flex flex-wrap gap-2">
-              {addresses.map((addr, i) => (
+              {addresses.map((addr) => (
                 <Badge
-                  key={i}
+                  key={addr}
                   variant="secondary"
                   className="cursor-pointer hover:bg-gray-200 transition-colors font-mono"
                   onClick={() => copyToClipboard(addr)}

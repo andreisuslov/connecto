@@ -1,4 +1,4 @@
-# Quick Start
+# Quick start
 
 Get SSH access between two machines in under a minute.
 
@@ -90,7 +90,7 @@ ssh mydesktop
 
 That's it! The listener exits automatically after successful pairing.
 
-## What Just Happened?
+## What just happened?
 
 1. **Listener** advertised itself via mDNS on your local network
 2. **Scanner** discovered the listener and displayed it
@@ -100,7 +100,7 @@ That's it! The listener exits automatically after successful pairing.
    - Listener added it to `~/.ssh/authorized_keys`
    - Client saved the private key and updated `~/.ssh/config`
 
-## Next Steps
+## Next steps
 
 - [List paired hosts](../commands/hosts.md): `connecto hosts`
 - [Test connection](../commands/test.md): `connecto test mydesktop`

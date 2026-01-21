@@ -28,7 +28,7 @@ The `listen` command starts a pairing listener on the current machine. It:
 
 ## Examples
 
-### Basic Usage
+### Basic usage
 
 ```bash
 connecto listen
@@ -49,13 +49,13 @@ Local IP addresses:
 Listening for pairing requests on port 8099...
 ```
 
-### Custom Name and Port
+### Custom name and port
 
 ```bash
 connecto listen --name workstation --port 9000
 ```
 
-### Continuous Mode
+### Continuous mode
 
 Keep listening for multiple pairings:
 
@@ -63,7 +63,7 @@ Keep listening for multiple pairings:
 connecto listen --continuous
 ```
 
-## What Happens During Pairing
+## What happens during pairing
 
 1. Client connects and sends their public key
 2. Listener adds the key to `~/.ssh/authorized_keys`
@@ -84,7 +84,7 @@ VPN/Cross-subnet connection detected!
     connecto config add-subnet 10.0.1.0/24
 ```
 
-## Security Notes
+## Security notes
 
 - Only run `listen` when you intend to pair
 - The listener only accepts SSH public keys (not arbitrary data)
