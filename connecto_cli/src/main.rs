@@ -160,6 +160,29 @@ enum Commands {
         #[arg(value_enum)]
         shell: Shell,
     },
+
+    /// Sync SSH keys bidirectionally with another device
+    Sync {
+        /// Port to use for sync
+        #[arg(short, long, default_value_t = connecto_core::DEFAULT_PORT)]
+        port: u16,
+
+        /// Custom device name (defaults to hostname)
+        #[arg(short, long)]
+        name: Option<String>,
+
+        /// Timeout in seconds for peer discovery
+        #[arg(short, long, default_value_t = connecto_core::DEFAULT_SYNC_TIMEOUT_SECS)]
+        timeout: u64,
+
+        /// Generate RSA key instead of Ed25519
+        #[arg(long)]
+        rsa: bool,
+
+        /// Use existing SSH key instead of generating a new one
+        #[arg(short, long, value_name = "PATH")]
+        key: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -249,6 +272,13 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
+        Commands::Sync {
+            port,
+            name,
+            timeout,
+            rsa,
+            key,
+        } => commands::sync::run(port, name, timeout, rsa, key).await,
     }
 }
 
@@ -981,5 +1011,58 @@ mod tests {
     fn test_verbose_flag() {
         let cli = Cli::try_parse_from(["connecto", "-v", "scan"]).unwrap();
         assert!(cli.verbose);
+    }
+
+    #[test]
+    fn test_sync_defaults() {
+        let cli = Cli::try_parse_from(["connecto", "sync"]).unwrap();
+        match cli.command {
+            Commands::Sync {
+                port,
+                name,
+                timeout,
+                rsa,
+                key,
+            } => {
+                assert_eq!(port, connecto_core::DEFAULT_PORT);
+                assert!(name.is_none());
+                assert_eq!(timeout, connecto_core::DEFAULT_SYNC_TIMEOUT_SECS);
+                assert!(!rsa);
+                assert!(key.is_none());
+            }
+            _ => panic!("Expected Sync command"),
+        }
+    }
+
+    #[test]
+    fn test_sync_with_options() {
+        let cli = Cli::try_parse_from([
+            "connecto",
+            "sync",
+            "--port",
+            "9000",
+            "--name",
+            "MyDevice",
+            "--timeout",
+            "120",
+            "--rsa",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Sync {
+                port,
+                name,
+                timeout,
+                rsa,
+                key,
+            } => {
+                assert_eq!(port, 9000);
+                assert_eq!(name, Some("MyDevice".to_string()));
+                assert_eq!(timeout, 120);
+                assert!(rsa);
+                assert!(key.is_none());
+            }
+            _ => panic!("Expected Sync command"),
+        }
     }
 }

@@ -5,6 +5,7 @@ pub mod keys;
 pub mod listen;
 pub mod pair;
 pub mod scan;
+pub mod sync;
 
 use colored::Colorize;
 

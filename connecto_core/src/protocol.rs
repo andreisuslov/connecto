@@ -40,6 +40,30 @@ pub enum Message {
 
     /// Pairing complete
     PairingComplete { ssh_user: String },
+
+    // Sync protocol messages (bidirectional pairing)
+    /// Initial sync hello with priority and key
+    SyncHello {
+        version: u32,
+        device_name: String,
+        initiator_priority: u64,
+        public_key: String,
+        key_comment: String,
+        ssh_user: String,
+    },
+
+    /// Sync hello acknowledgment with key
+    SyncHelloAck {
+        version: u32,
+        device_name: String,
+        public_key: String,
+        key_comment: String,
+        ssh_user: String,
+        accept_sync: bool,
+    },
+
+    /// Sync complete confirmation
+    SyncComplete { success: bool, message: String },
 }
 
 impl Message {
@@ -652,5 +676,141 @@ mod tests {
             events.push(event);
         }
         assert!(!events.is_empty());
+    }
+
+    // Sync protocol message tests
+
+    #[test]
+    fn test_sync_hello_serialization() {
+        let msg = Message::SyncHello {
+            version: PROTOCOL_VERSION,
+            device_name: "Device A".to_string(),
+            initiator_priority: 12345678901234567890,
+            public_key: "ssh-ed25519 AAAAC3... test@device-a".to_string(),
+            key_comment: "test@device-a".to_string(),
+            ssh_user: "alice".to_string(),
+        };
+
+        let json = msg.to_json().unwrap();
+        assert!(json.contains("SyncHello"));
+        assert!(json.contains("initiator_priority"));
+        assert!(json.ends_with('\n'));
+
+        let deserialized = Message::from_json(&json).unwrap();
+        match deserialized {
+            Message::SyncHello {
+                version,
+                device_name,
+                initiator_priority,
+                public_key,
+                key_comment,
+                ssh_user,
+            } => {
+                assert_eq!(version, PROTOCOL_VERSION);
+                assert_eq!(device_name, "Device A");
+                assert_eq!(initiator_priority, 12345678901234567890);
+                assert!(public_key.contains("ssh-ed25519"));
+                assert_eq!(key_comment, "test@device-a");
+                assert_eq!(ssh_user, "alice");
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_sync_hello_ack_serialization() {
+        let msg = Message::SyncHelloAck {
+            version: PROTOCOL_VERSION,
+            device_name: "Device B".to_string(),
+            public_key: "ssh-ed25519 AAAAC3... test@device-b".to_string(),
+            key_comment: "test@device-b".to_string(),
+            ssh_user: "bob".to_string(),
+            accept_sync: true,
+        };
+
+        let json = msg.to_json().unwrap();
+        assert!(json.contains("SyncHelloAck"));
+        assert!(json.contains("accept_sync"));
+
+        let deserialized = Message::from_json(&json).unwrap();
+        match deserialized {
+            Message::SyncHelloAck {
+                version,
+                device_name,
+                public_key,
+                key_comment,
+                ssh_user,
+                accept_sync,
+            } => {
+                assert_eq!(version, PROTOCOL_VERSION);
+                assert_eq!(device_name, "Device B");
+                assert!(public_key.contains("ssh-ed25519"));
+                assert_eq!(key_comment, "test@device-b");
+                assert_eq!(ssh_user, "bob");
+                assert!(accept_sync);
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_sync_hello_ack_rejection() {
+        let msg = Message::SyncHelloAck {
+            version: PROTOCOL_VERSION,
+            device_name: "Device B".to_string(),
+            public_key: "".to_string(),
+            key_comment: "".to_string(),
+            ssh_user: "".to_string(),
+            accept_sync: false,
+        };
+
+        let json = msg.to_json().unwrap();
+        let deserialized = Message::from_json(&json).unwrap();
+
+        match deserialized {
+            Message::SyncHelloAck { accept_sync, .. } => {
+                assert!(!accept_sync);
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_sync_complete_serialization() {
+        let msg = Message::SyncComplete {
+            success: true,
+            message: "Sync completed successfully".to_string(),
+        };
+
+        let json = msg.to_json().unwrap();
+        assert!(json.contains("SyncComplete"));
+
+        let deserialized = Message::from_json(&json).unwrap();
+        match deserialized {
+            Message::SyncComplete { success, message } => {
+                assert!(success);
+                assert_eq!(message, "Sync completed successfully");
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_sync_complete_failure() {
+        let msg = Message::SyncComplete {
+            success: false,
+            message: "Key installation failed".to_string(),
+        };
+
+        let json = msg.to_json().unwrap();
+        let deserialized = Message::from_json(&json).unwrap();
+
+        match deserialized {
+            Message::SyncComplete { success, message } => {
+                assert!(!success);
+                assert_eq!(message, "Key installation failed");
+            }
+            _ => panic!("Wrong message type"),
+        }
     }
 }

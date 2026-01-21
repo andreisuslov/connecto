@@ -19,6 +19,7 @@ directories = { workspace = true }
 hostname = "0.4"
 local-ip-address = "0.6"
 futures = "0.3"
+flume = "0.11"
 
 [dev-dependencies]
 mockall = { workspace = true }
