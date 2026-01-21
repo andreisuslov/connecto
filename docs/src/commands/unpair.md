@@ -58,7 +58,7 @@ connecto pair 0
 
 A new key pair will be generated and exchanged.
 
-## Related Commands
+## Related commands
 
 | Command | Description |
 |---------|-------------|

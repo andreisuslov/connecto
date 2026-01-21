@@ -3,23 +3,11 @@ import { ScanAndPairTab } from '@/app/components/ScanAndPairTab';
 import { ListenTab } from '@/app/components/ListenTab';
 import { KeysTab } from '@/app/components/KeysTab';
 import { Toaster } from '@/app/components/ui/sonner';
-import { Radio } from 'lucide-react';
 
 export default function App() {
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 overflow-x-hidden max-w-full">
       <Toaster />
-
-      {/* Header */}
-      <div className="border-b bg-white shadow-sm">
-        <div className="max-w-4xl mx-auto px-6 py-4">
-          <div className="flex items-center gap-3">
-            <div className="p-2 bg-gradient-to-br from-blue-500 to-purple-600 rounded-xl">
-              <Radio className="size-5 text-white" />
-            </div>
-          </div>
-        </div>
-      </div>
 
       {/* Main Content */}
       <div className="max-w-4xl mx-auto px-6 py-6">

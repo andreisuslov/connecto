@@ -40,7 +40,7 @@ connecto export
 connecto export | pbcopy
 ```
 
-### Export Format
+### Export format
 
 ```json
 {
@@ -102,7 +102,7 @@ Output:
 Successfully imported 2 hosts.
 ```
 
-### Handling Conflicts
+### Handling conflicts
 
 If a host already exists:
 - Existing keys are preserved
@@ -118,9 +118,9 @@ connecto import backup.json
 
 ---
 
-## Use Cases
+## Use cases
 
-### Backup Before Reinstall
+### Backup before reinstall
 
 ```bash
 connecto export > ~/Dropbox/connecto-backup.json
@@ -128,7 +128,7 @@ connecto export > ~/Dropbox/connecto-backup.json
 connecto import ~/Dropbox/connecto-backup.json
 ```
 
-### Transfer to New Machine
+### Transfer to new machine
 
 ```bash
 # On old machine
@@ -139,7 +139,7 @@ scp /tmp/connecto.json newmachine:/tmp/
 connecto import /tmp/connecto.json
 ```
 
-### Sync Across Machines
+### Sync across machines
 
 While not a true sync, you can share exports via cloud storage:
 
@@ -151,7 +151,7 @@ connecto export > ~/Dropbox/connecto.json
 connecto import ~/Dropbox/connecto.json
 ```
 
-## Security Notes
+## Security notes
 
 - The export contains **references to private keys** (file paths), not the keys themselves
 - The actual key files in `~/.ssh/` should be backed up separately
@@ -163,7 +163,7 @@ connecto export > connecto-backup.json
 cp ~/.ssh/connecto_* ~/backup/
 ```
 
-## Related Commands
+## Related commands
 
 | Command | Description |
 |---------|-------------|

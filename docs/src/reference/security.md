@@ -2,9 +2,9 @@
 
 Security model and best practices for Connecto.
 
-## Threat Model
+## Threat model
 
-### Protected Against
+### Protected against
 
 | Threat | Protection |
 |--------|------------|
@@ -13,7 +13,7 @@ Security model and best practices for Connecto.
 | Replay attacks | SSH protocol cryptographic protection |
 | Network sniffing | SSH encrypts all traffic after pairing |
 
-### Not Protected Against
+### Not protected against
 
 | Threat | Mitigation |
 |--------|------------|
@@ -21,21 +21,46 @@ Security model and best practices for Connecto.
 | Physical device access | Use full-disk encryption |
 | Compromised endpoints | Keep systems updated |
 
-## Key Security
+## Key security
 
-### Key Generation
+### Key generation
 
 - **Algorithm**: Ed25519 (elliptic curve)
 - **Security level**: 128-bit equivalent
 - **Key size**: 256-bit private, 256-bit public
 
 Ed25519 advantages:
+
 - No known practical attacks
 - Resistant to timing attacks
 - Small, fast signatures
 - Widely supported (OpenSSH 6.5+)
 
-### Key Storage
+### When to prefer RSA-4096
+
+While Ed25519 is the default and recommended for most users, RSA-4096 may be preferred in certain scenarios:
+
+| Reason | Details |
+|--------|---------|
+| **Legacy compatibility** | Systems running OpenSSH < 6.5 (pre-2014) or older embedded devices may not support Ed25519 |
+| **Hardware security modules** | Some older HSMs, smart cards, and hardware tokens only support RSA keys |
+| **Compliance requirements** | Certain regulatory frameworks (e.g., older FIPS 140-2 configurations, some government standards) may mandate RSA |
+| **Conservative cryptographic choice** | RSA has 40+ years of cryptanalysis; some organizations prefer battle-tested algorithms |
+| **Cross-platform interoperability** | Better support across legacy SSH implementations, older libraries, and enterprise software |
+
+RSA-4096 trade-offs:
+
+- **Slower**: key generation, signing, and verification are significantly slower than Ed25519
+- **Larger keys**: 4096-bit keys vs 256-bit (affects storage and transmission)
+- **More complex implementation**: higher risk of implementation flaws (padding oracles, timing attacks)
+
+To use RSA-4096 with Connecto, specify the key type during pairing:
+
+```bash
+connecto pair --key-type rsa <target>
+```
+
+### Key storage
 
 | Component | Location | Permissions |
 |-----------|----------|-------------|
@@ -43,16 +68,16 @@ Ed25519 advantages:
 | Public key | `~/.ssh/connecto_*.pub` | 644 (world readable) |
 | Authorized keys | `~/.ssh/authorized_keys` | 600 |
 
-### Key Lifecycle
+### Key lifecycle
 
 1. **Generation**: Created fresh for each pairing
 2. **Distribution**: Public key sent to listener
 3. **Storage**: Private key saved locally, public key in `authorized_keys`
 4. **Revocation**: `connecto unpair` removes local keys; manual removal from `authorized_keys`
 
-## Network Security
+## Network security
 
-### Pairing Protocol
+### Pairing protocol
 
 The pairing protocol is **unencrypted** but designed to be safe:
 
@@ -60,7 +85,7 @@ The pairing protocol is **unencrypted** but designed to be safe:
 - Connection requires network access (implicit trust boundary)
 - Short-lived listener (exits after pairing)
 
-### Ports Used
+### Ports used
 
 | Port | Protocol | Purpose | Exposure |
 |------|----------|---------|----------|
@@ -74,29 +99,29 @@ The pairing protocol is **unencrypted** but designed to be safe:
 2. **VPN**: Use VPN for cross-internet pairing
 3. **Monitoring**: Log `authorized_keys` changes
 
-## Best Practices
+## Best practices
 
-### Before Pairing
+### Before pairing
 
-- [ ] Verify you're on a trusted network
-- [ ] Confirm the target IP is correct
-- [ ] Ensure the listener is running on the intended machine
+-Verify you're on a trusted network
+-Confirm the target IP is correct
+-Ensure the listener is running on the intended machine
 
-### After Pairing
+### After pairing
 
-- [ ] Test the connection: `connecto test <host>`
-- [ ] Verify SSH host key fingerprint on first connect
-- [ ] Stop the listener if still running
+- Test the connection: `connecto test <host>`
+- Verify SSH host key fingerprint on first connect
+- Stop the listener if still running
 
 ### Ongoing
 
-- [ ] Periodically review `~/.ssh/authorized_keys`
-- [ ] Remove unused pairings: `connecto unpair <host>`
-- [ ] Keep Connecto and SSH updated
+- Periodically review `~/.ssh/authorized_keys`
+- Remove unused pairings: `connecto unpair <host>`
+- Keep Connecto and SSH updated
 
 ## Auditing
 
-### List Connecto Keys
+### List Connecto keys
 
 ```bash
 connecto hosts
@@ -108,7 +133,7 @@ connecto hosts
 grep connecto ~/.ssh/authorized_keys
 ```
 
-### Check Key Fingerprints
+### Check key fingerprints
 
 ```bash
 for key in ~/.ssh/connecto_*.pub; do
@@ -117,7 +142,7 @@ for key in ~/.ssh/connecto_*.pub; do
 done
 ```
 
-### SSH Connection Logs
+### SSH connection logs
 
 ```bash
 # macOS
@@ -131,29 +156,32 @@ Get-EventLog -LogName Security -InstanceId 4624 |
   Where-Object { $_.Message -like "*ssh*" }
 ```
 
-## Incident Response
+## Incident response
 
-### Suspected Compromise
+### Suspected compromise
 
 1. **Immediately**: Remove unauthorized keys
+
    ```bash
    # Edit authorized_keys
    nano ~/.ssh/authorized_keys
    ```
 
 2. **Audit**: Check all Connecto pairings
+
    ```bash
    connecto hosts
    ```
 
 3. **Revoke**: Remove suspicious pairings
+
    ```bash
    connecto unpair <suspicious-host>
    ```
 
 4. **Investigate**: Check SSH logs for unauthorized access
 
-### Key Rotation
+### Key rotation
 
 To rotate keys for a host:
 
@@ -166,16 +194,16 @@ connecto pair 0
 
 ## Comparison
 
-### vs Password Authentication
+### vs password authentication
 
-| Aspect | Password | Connecto (SSH Keys) |
+| Aspect | Password | Connecto (SSH keys) |
 |--------|----------|---------------------|
 | Brute force | Vulnerable | Immune |
 | Credential reuse | Common | Impossible |
 | Phishing | Possible | Difficult |
 | Setup complexity | Low | Low (with Connecto) |
 
-### vs Manual SSH Keys
+### vs manual SSH keys
 
 | Aspect | Manual | Connecto |
 |--------|--------|----------|

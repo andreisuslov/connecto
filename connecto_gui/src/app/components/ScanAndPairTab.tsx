@@ -144,12 +144,12 @@ export function ScanAndPairTab() {
 
   return (
     <div className="space-y-6">
-      {/* Network Discovery */}
+      {/* Network discovery */}
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
             <div>
-              <CardTitle>Network Discovery</CardTitle>
+              <CardTitle>Network discovery</CardTitle>
               <CardDescription>Find devices running Connecto on your local network</CardDescription>
             </div>
             <Button onClick={handleScan} disabled={isScanning}>
@@ -161,7 +161,7 @@ export function ScanAndPairTab() {
               ) : (
                 <>
                   <Wifi className="mr-2 size-4" />
-                  Scan Network
+                  Scan network
                 </>
               )}
             </Button>
@@ -171,7 +171,7 @@ export function ScanAndPairTab() {
           <div className="space-y-3">
             {devices.length === 0 ? (
               <p className="text-center text-gray-500 py-8">
-                No devices found. Click "Scan Network" to search.
+                No devices found. Click "Scan network" to search.
               </p>
             ) : (
               devices.map((device) => (
@@ -215,13 +215,13 @@ export function ScanAndPairTab() {
         </CardContent>
       </Card>
 
-      {/* Paired Hosts */}
+      {/* Paired hosts */}
       {pairedHosts.length > 0 && (
         <Card>
           <CardHeader>
             <div className="flex items-center justify-between">
               <div>
-                <CardTitle>Paired Hosts</CardTitle>
+                <CardTitle>Paired hosts</CardTitle>
                 <CardDescription>Previously paired SSH connections</CardDescription>
               </div>
               <Badge variant="secondary">{pairedHosts.length} host(s)</Badge>
@@ -266,10 +266,10 @@ export function ScanAndPairTab() {
         </Card>
       )}
 
-      {/* Manual Connect */}
+      {/* Manual connect */}
       <Card>
         <CardHeader>
-          <CardTitle>Manual Connect</CardTitle>
+          <CardTitle>Manual connect</CardTitle>
           <CardDescription>Enter IP:port directly if mDNS doesn't find the device</CardDescription>
         </CardHeader>
         <CardContent>
@@ -285,11 +285,11 @@ export function ScanAndPairTab() {
         </CardContent>
       </Card>
 
-      {/* SSH Command Result */}
+      {/* SSH command result */}
       {pairingResult && pairingResult.success && (
         <Card className="border-green-200 bg-green-50">
           <CardHeader>
-            <CardTitle className="text-green-900">Connection Ready!</CardTitle>
+            <CardTitle className="text-green-900">Connection ready!</CardTitle>
             <CardDescription className="text-green-700">
               Successfully paired with {pairingResult.server_name}
             </CardDescription>
@@ -309,7 +309,7 @@ export function ScanAndPairTab() {
               </div>
             </div>
             <div>
-              <p className="text-sm font-medium text-green-800 mb-1">Private Key</p>
+              <p className="text-sm font-medium text-green-800 mb-1">Private key</p>
               <div className="flex items-center gap-2 p-3 bg-white border rounded-lg font-mono text-sm">
                 <code className="flex-1 truncate">{pairingResult.private_key_path}</code>
                 <Button

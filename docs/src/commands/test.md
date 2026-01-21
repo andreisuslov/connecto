@@ -25,7 +25,7 @@ The `test` command verifies that SSH connectivity works to a paired host. It:
 
 ## Example
 
-### Successful Test
+### Successful test
 
 ```bash
 connecto test mydesktop
@@ -41,7 +41,7 @@ Output:
   → SSH to mydesktop is working.
 ```
 
-### Failed Test
+### Failed test
 
 ```bash
 connecto test mydesktop
@@ -62,7 +62,7 @@ Troubleshooting:
   • Update IP if changed: connecto update-ip mydesktop <new-ip>
 ```
 
-## Common Issues
+## Common issues
 
 | Error | Cause | Solution |
 |-------|-------|----------|
@@ -71,7 +71,7 @@ Troubleshooting:
 | Permission denied | Key not in authorized_keys | Re-pair with `connecto pair` |
 | Host key verification failed | Remote host changed | Remove from `~/.ssh/known_hosts` |
 
-## Related Commands
+## Related commands
 
 | Command | Description |
 |---------|-------------|

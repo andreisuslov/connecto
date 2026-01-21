@@ -75,7 +75,7 @@ To find your profile path:
 echo $PROFILE
 ```
 
-## Example Usage
+## Example usage
 
 After installation:
 

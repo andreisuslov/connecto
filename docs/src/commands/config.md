@@ -121,7 +121,7 @@ Output:
 Config file: /Users/john/.config/connecto/config.json
 ```
 
-### Config File Locations
+### Config file locations
 
 | Platform | Path |
 |----------|------|
@@ -131,7 +131,7 @@ Config file: /Users/john/.config/connecto/config.json
 
 ---
 
-## Config File Format
+## Config file format
 
 The config file is JSON:
 
@@ -149,7 +149,7 @@ You can edit it manually, but using the `connecto config` commands is recommende
 
 ---
 
-## Use Cases
+## Use cases
 
 ### VPN Setup
 
@@ -163,7 +163,7 @@ connecto config add-subnet 10.0.2.0/24
 connecto scan
 ```
 
-### Multiple Office Networks
+### Multiple office networks
 
 ```bash
 connecto config add-subnet 10.0.1.0/24   # Office A
@@ -173,7 +173,7 @@ connecto config add-subnet 192.168.0.0/24 # Home
 
 Scans will check all saved subnets regardless of which network you're on.
 
-## Related Commands
+## Related commands
 
 | Command | Description |
 |---------|-------------|

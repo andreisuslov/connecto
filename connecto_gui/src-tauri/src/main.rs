@@ -11,8 +11,9 @@ mod commands;
 mod state;
 
 use commands::{
-    generate_key_pair, get_addresses, get_device_name, get_listener_status, list_authorized_keys,
-    list_paired_hosts, pair_with_address, pair_with_device, remove_authorized_key, scan_devices,
+    delete_local_key, generate_key_pair, get_addresses, get_device_name, get_key_details,
+    get_listener_status, list_authorized_keys, list_local_keys, list_paired_hosts,
+    pair_with_address, pair_with_device, remove_authorized_key, rename_local_key, scan_devices,
     start_listener, stop_listener,
 };
 use state::AppState;
@@ -39,6 +40,10 @@ fn main() {
             remove_authorized_key,
             generate_key_pair,
             list_paired_hosts,
+            list_local_keys,
+            delete_local_key,
+            get_key_details,
+            rename_local_key,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

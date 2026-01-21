@@ -2,7 +2,7 @@
 
 Connecto stores configuration in platform-specific locations.
 
-## Config File Location
+## Config file location
 
 | Platform | Path |
 |----------|------|
@@ -15,7 +15,7 @@ Find your config path:
 connecto config path
 ```
 
-## Config File Format
+## Config file format
 
 ```json
 {
@@ -47,7 +47,7 @@ Host mydesktop
     IdentitiesOnly yes
 ```
 
-### Entry Fields
+### Entry fields
 
 | Field | Description |
 |-------|-------------|
@@ -66,13 +66,13 @@ Keys are stored in the SSH directory:
 | macOS/Linux | `~/.ssh/` |
 | Windows | `%USERPROFILE%\.ssh\` |
 
-### Key Files
+### Key files
 
 For each paired host:
 - `~/.ssh/connecto_<hostname>` - Private key
 - `~/.ssh/connecto_<hostname>.pub` - Public key
 
-### Key Type
+### Key type
 
 Connecto generates Ed25519 keys by default:
 - Modern elliptic curve cryptography
@@ -80,7 +80,7 @@ Connecto generates Ed25519 keys by default:
 - Small key size (compact `authorized_keys`)
 - Fast generation and authentication
 
-## Environment Variables
+## Environment variables
 
 | Variable | Description |
 |----------|-------------|

@@ -27,7 +27,7 @@ Connecto uses a simple TCP-based protocol for key exchange:
       ×─────── Connection Closed ─────────×
 ```
 
-## Message Format
+## Message format
 
 All messages are newline-terminated strings:
 
@@ -108,7 +108,7 @@ Connecto advertises via mDNS:
 
 Devices respond to mDNS queries on UDP port 5353.
 
-### Subnet Scanning
+### Subnet scanning
 
 For cross-subnet discovery, Connecto scans IP ranges:
 
@@ -117,15 +117,15 @@ For cross-subnet discovery, Connecto scans IP ranges:
 3. 100 concurrent connections, 500ms timeout each
 4. Valid listeners respond to HELLO
 
-## Security Considerations
+## Security considerations
 
-### What's Protected
+### What's protected
 
 - **Authentication**: SSH keys provide cryptographic authentication
 - **Integrity**: SSH protocol ensures connection integrity
 - **Authorization**: Keys only added with physical/network access
 
-### What's Not Protected
+### What's not protected
 
 - **Initial Exchange**: The pairing protocol itself is unencrypted
 - **Network Eavesdropping**: Public keys are sent in plaintext (this is safe - they're public)
@@ -138,7 +138,7 @@ For cross-subnet discovery, Connecto scans IP ranges:
 - Use SSH host key verification after pairing
 - Review `authorized_keys` periodically
 
-## Wire Format Example
+## Wire format example
 
 Complete pairing session:
 
@@ -151,7 +151,7 @@ CLIENT: BYE
 [connection closed]
 ```
 
-## Future Considerations
+## Future considerations
 
 Potential protocol enhancements:
 - TLS encryption for the pairing channel

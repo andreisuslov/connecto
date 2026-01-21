@@ -38,7 +38,7 @@ Output:
     → Key:  ~/.ssh/connecto_laptop
 ```
 
-## Output Fields
+## Output fields
 
 | Field | Description |
 |-------|-------------|
@@ -46,7 +46,7 @@ Output:
 | User | Username for SSH connection |
 | Key | Path to the private key file |
 
-## Related Commands
+## Related commands
 
 | Command | Description |
 |---------|-------------|
