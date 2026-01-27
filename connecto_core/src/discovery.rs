@@ -110,9 +110,9 @@ impl ServiceAdvertiser {
     /// Stop advertising
     pub fn stop(&mut self) -> Result<()> {
         if let Some(fullname) = self.service_fullname.take() {
-            self.daemon
-                .unregister(&fullname)
-                .map_err(|e| ConnectoError::Discovery(format!("Failed to unregister: {}", e)))?;
+            // Ignore errors during unregister - the daemon may already be shut down
+            // This is expected during normal shutdown and shouldn't be treated as an error
+            let _ = self.daemon.unregister(&fullname);
             info!("Stopped advertising service");
         }
         Ok(())
