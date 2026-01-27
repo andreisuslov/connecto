@@ -27,6 +27,9 @@ brew install andreisuslov/connecto/connecto
 # Windows (PowerShell as Admin)
 irm https://raw.githubusercontent.com/andreisuslov/connecto/main/install.ps1 | iex
 
+# Windows (older systems - enable TLS 1.2 first)
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://raw.githubusercontent.com/andreisuslov/connecto/main/install.ps1 | iex
+
 # From source
 cargo install --path connecto_cli
 ```
