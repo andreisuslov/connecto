@@ -239,6 +239,13 @@ enum ConfigAction {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Enable ANSI color support on Windows
+    #[cfg(windows)]
+    {
+        // Enable virtual terminal processing for ANSI colors
+        let _ = colored::control::set_virtual_terminal(true);
+    }
+
     let cli = Cli::parse();
 
     // Set up logging
