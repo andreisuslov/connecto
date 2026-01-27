@@ -4,6 +4,9 @@
 
 $ErrorActionPreference = "Stop"
 
+# Enable TLS 1.2 for older Windows systems (required for GitHub)
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
 $repo = "andreisuslov/connecto"
 $installDir = "$env:LOCALAPPDATA\connecto"
 
