@@ -1,0 +1,35 @@
+name: Build Windows Binary
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v0.3.6)'
+        required: true
+        type: string
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Build Windows binary
+        run: cargo build --release --package connecto_cli
+
+      - name: Package binary
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release
+          Copy-Item target/release/connecto.exe release/
+          Compress-Archive -Path release/connecto.exe -DestinationPath release/connecto-windows-x86_64.zip
+          (Get-FileHash release/connecto-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower() + "  connecto-windows-x86_64.zip" | Out-File -Encoding ASCII release/connecto-windows-x86_64.zip.sha256
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: gh release upload "$VERSION" release/connecto-windows-x86_64.zip release/connecto-windows-x86_64.zip.sha256 --clobber
