@@ -8,6 +8,8 @@ use ssh_key::{Algorithm, LineEnding, PrivateKey, PublicKey};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
+#[cfg(target_os = "windows")]
+use tracing::warn;
 
 /// Supported SSH key algorithms
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -180,8 +182,40 @@ impl KeyManager {
     }
 
     /// Get the path to authorized_keys file
+    /// On Windows, admin users require a different path
     pub fn authorized_keys_path(&self) -> PathBuf {
-        self.ssh_dir.join("authorized_keys")
+        #[cfg(target_os = "windows")]
+        {
+            if Self::is_windows_admin() {
+                // Windows OpenSSH Server uses a special path for admin users
+                PathBuf::from(r"C:\ProgramData\ssh\administrators_authorized_keys")
+            } else {
+                self.ssh_dir.join("authorized_keys")
+            }
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            self.ssh_dir.join("authorized_keys")
+        }
+    }
+
+    /// Check if running as Windows Administrator
+    #[cfg(target_os = "windows")]
+    fn is_windows_admin() -> bool {
+        use std::process::Command;
+
+        let output = Command::new("powershell")
+            .args([
+                "-Command",
+                "([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)",
+            ])
+            .output();
+
+        match output {
+            Ok(out) => String::from_utf8_lossy(&out.stdout).trim() == "True",
+            Err(_) => false,
+        }
     }
 
     /// Add a public key to authorized_keys
@@ -189,6 +223,13 @@ impl KeyManager {
         self.ensure_ssh_dir()?;
 
         let auth_keys_path = self.authorized_keys_path();
+
+        // Ensure parent directory exists (needed for Windows admin path)
+        if let Some(parent) = auth_keys_path.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent)?;
+            }
+        }
 
         // Check if key already exists
         if auth_keys_path.exists() {
@@ -217,7 +258,60 @@ impl KeyManager {
             fs::set_permissions(&auth_keys_path, fs::Permissions::from_mode(0o600))?;
         }
 
+        #[cfg(target_os = "windows")]
+        {
+            // Set proper ACL for Windows admin authorized_keys file
+            // The file must be owned by Administrators or SYSTEM and not writable by others
+            if Self::is_windows_admin() {
+                Self::set_windows_admin_key_permissions(&auth_keys_path)?;
+            }
+        }
+
         Ok(())
+    }
+
+    /// Set proper ACL permissions on Windows admin authorized_keys file
+    #[cfg(target_os = "windows")]
+    fn set_windows_admin_key_permissions(path: &std::path::Path) -> Result<()> {
+        use std::process::Command;
+
+        // Remove inherited permissions and set explicit ACL:
+        // - SYSTEM: Full control
+        // - Administrators: Full control
+        // This matches what OpenSSH Server expects
+        let path_str = path.to_string_lossy();
+
+        let output = Command::new("powershell")
+            .args([
+                "-Command",
+                &format!(
+                    r#"
+                    $acl = Get-Acl '{}'
+                    $acl.SetAccessRuleProtection($true, $false)
+                    $adminRule = New-Object System.Security.AccessControl.FileSystemAccessRule('BUILTIN\Administrators', 'FullControl', 'Allow')
+                    $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule('NT AUTHORITY\SYSTEM', 'FullControl', 'Allow')
+                    $acl.SetAccessRule($adminRule)
+                    $acl.SetAccessRule($systemRule)
+                    Set-Acl '{}' $acl
+                    "#,
+                    path_str, path_str
+                ),
+            ])
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => Ok(()),
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                // Log warning but don't fail - key might still work
+                warn!("Could not set ACL on {}: {}", path_str, stderr);
+                Ok(())
+            }
+            Err(e) => {
+                warn!("Could not set ACL on {}: {}", path_str, e);
+                Ok(())
+            }
+        }
     }
 
     /// Remove a public key from authorized_keys
