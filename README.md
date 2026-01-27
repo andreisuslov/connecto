@@ -27,12 +27,25 @@ brew install andreisuslov/connecto/connecto
 # Windows (PowerShell as Admin)
 irm https://raw.githubusercontent.com/andreisuslov/connecto/main/install.ps1 | iex
 
-# Windows (older systems - enable TLS 1.2 first)
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://raw.githubusercontent.com/andreisuslov/connecto/main/install.ps1 | iex
-
 # From source
 cargo install --path connecto_cli
 ```
+
+<details>
+<summary><b>Windows SSL/TLS Error?</b> (click to expand)</summary>
+
+If you see "could not create SSL/TLS secure channel", run these two commands separately:
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+```
+```powershell
+irm https://raw.githubusercontent.com/andreisuslov/connecto/main/install.ps1 | iex
+```
+
+This is needed on older Windows systems (Server 2012, older PowerShell) that don't enable TLS 1.2 by default.
+
+</details>
 
 ## Documentation
 
