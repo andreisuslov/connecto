@@ -7,6 +7,7 @@ use crate::keys::{KeyManager, SshKeyPair};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -188,6 +189,8 @@ impl HandshakeServer {
     }
 
     /// Handle a single pairing request (useful for one-shot mode)
+    /// Keeps accepting connections until one successfully completes pairing.
+    /// This prevents incomplete handshakes (like from scanners) from consuming the session.
     pub async fn handle_one(&mut self, event_tx: mpsc::Sender<ServerEvent>) -> Result<()> {
         let listener = self
             .listener
@@ -197,21 +200,39 @@ impl HandshakeServer {
         let addr = listener.local_addr()?;
         let _ = event_tx.send(ServerEvent::Started { address: addr }).await;
 
-        let (stream, peer_addr) = listener.accept().await?;
-        info!("Client connected from {}", peer_addr);
-        let _ = event_tx
-            .send(ServerEvent::ClientConnected { address: peer_addr })
-            .await;
+        loop {
+            let (stream, peer_addr) = listener.accept().await?;
+            info!("Client connected from {}", peer_addr);
+            let _ = event_tx
+                .send(ServerEvent::ClientConnected { address: peer_addr })
+                .await;
 
-        handle_client(
-            stream,
-            peer_addr,
-            Arc::clone(&self.key_manager),
-            self.device_name.clone(),
-            self.require_verification,
-            event_tx,
-        )
-        .await
+            match handle_client(
+                stream,
+                peer_addr,
+                Arc::clone(&self.key_manager),
+                self.device_name.clone(),
+                self.require_verification,
+                event_tx.clone(),
+            )
+            .await
+            {
+                Ok(()) => {
+                    // Successful pairing, exit the loop
+                    return Ok(());
+                }
+                Err(e) => {
+                    // Failed handshake (e.g., scanner probe, incomplete connection)
+                    // Log and continue waiting for real pairing requests
+                    warn!("Handshake failed from {}: {} - waiting for next connection", peer_addr, e);
+                    let _ = event_tx
+                        .send(ServerEvent::Error {
+                            message: format!("Incomplete handshake from {}: {}", peer_addr, e),
+                        })
+                        .await;
+                }
+            }
+        }
     }
 }
 
@@ -284,9 +305,25 @@ async fn handle_client(
     };
     writer.write_all(hello_ack.to_json()?.as_bytes()).await?;
 
-    // Read KeyExchange
+    // Read KeyExchange with timeout (handles scanner probes that disconnect after HelloAck)
     line.clear();
-    reader.read_line(&mut line).await?;
+    let read_result = tokio::time::timeout(Duration::from_secs(30), reader.read_line(&mut line)).await;
+
+    match read_result {
+        Ok(Ok(0)) | Err(_) => {
+            // EOF (client disconnected) or timeout - likely a scanner probe
+            return Err(ConnectoError::Handshake(
+                "Client disconnected before sending key (possibly a scanner probe)".to_string(),
+            ));
+        }
+        Ok(Err(e)) => {
+            return Err(ConnectoError::Network(format!("Failed to read KeyExchange: {}", e)));
+        }
+        Ok(Ok(_)) => {
+            // Successfully read data, continue
+        }
+    }
+
     let key_exchange = Message::from_json(&line)?;
 
     match key_exchange {
