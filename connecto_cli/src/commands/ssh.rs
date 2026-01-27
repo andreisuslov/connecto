@@ -108,37 +108,59 @@ async fn enable_windows() -> Result<()> {
     // Check if OpenSSH Server is installed
     println!("{} Checking OpenSSH Server installation...", "→".cyan());
 
-    let check_output = Command::new("powershell")
-        .args([
-            "-Command",
-            "Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Server*' | Select-Object -ExpandProperty State"
-        ])
+    // First check if sshd service already exists (works on all Windows versions)
+    let service_check = Command::new("powershell")
+        .args(["-Command", "Get-Service sshd -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name"])
         .output()?;
 
-    let state = String::from_utf8_lossy(&check_output.stdout).trim().to_string();
+    let sshd_exists = !String::from_utf8_lossy(&service_check.stdout).trim().is_empty();
 
-    if state != "Installed" {
-        println!("{} Installing OpenSSH Server...", "→".cyan());
-
-        let install_output = Command::new("powershell")
-            .args([
-                "-Command",
-                "Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0"
-            ])
+    if sshd_exists {
+        println!("{} OpenSSH Server already installed.", "✓".green());
+    } else {
+        // Try Windows 10/Server 2016+ method first (Add-WindowsCapability)
+        let capability_check = Command::new("powershell")
+            .args(["-Command", "Get-Command Add-WindowsCapability -ErrorAction SilentlyContinue"])
             .output()?;
 
-        if !install_output.status.success() {
-            let stderr = String::from_utf8_lossy(&install_output.stderr);
-            println!("{} Failed to install OpenSSH Server.", "✗".red());
-            if !stderr.is_empty() {
-                println!("{}", stderr.dimmed());
+        if capability_check.status.success() && !String::from_utf8_lossy(&capability_check.stdout).trim().is_empty() {
+            // Modern Windows - use Add-WindowsCapability
+            println!("{} Installing OpenSSH Server...", "→".cyan());
+
+            let install_output = Command::new("powershell")
+                .args([
+                    "-Command",
+                    "Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0"
+                ])
+                .output()?;
+
+            if !install_output.status.success() {
+                let stderr = String::from_utf8_lossy(&install_output.stderr);
+                println!("{} Failed to install OpenSSH Server.", "✗".red());
+                if !stderr.is_empty() {
+                    println!("{}", stderr.dimmed());
+                }
+                return Ok(());
             }
+
+            println!("{} OpenSSH Server installed.", "✓".green());
+        } else {
+            // Older Windows (Server 2012 R2, etc.) - OpenSSH must be installed manually
+            println!("{} OpenSSH Server is not installed.", "✗".red());
+            println!();
+            println!("Your Windows version requires manual OpenSSH installation:");
+            println!();
+            println!("  1. Download OpenSSH from:");
+            println!("     {}", "https://github.com/PowerShell/Win32-OpenSSH/releases".cyan());
+            println!();
+            println!("  2. Extract to C:\\Program Files\\OpenSSH");
+            println!();
+            println!("  3. Run as Administrator:");
+            println!("     {}", "powershell -ExecutionPolicy Bypass -File \"C:\\Program Files\\OpenSSH\\install-sshd.ps1\"".dimmed());
+            println!();
+            println!("  4. Then run {} again.", "connecto ssh on".cyan());
             return Ok(());
         }
-
-        println!("{} OpenSSH Server installed.", "✓".green());
-    } else {
-        println!("{} OpenSSH Server already installed.", "✓".green());
     }
 
     // Start the sshd service
