@@ -183,6 +183,12 @@ enum Commands {
         #[arg(short, long, value_name = "PATH")]
         key: Option<String>,
     },
+
+    /// Manage SSH server (Windows: enable/disable OpenSSH Server)
+    Ssh {
+        #[command(subcommand)]
+        action: SshAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -194,6 +200,16 @@ enum KeysAction {
         /// Key number or search pattern
         target: String,
     },
+}
+
+#[derive(Subcommand)]
+enum SshAction {
+    /// Enable SSH server (install and start OpenSSH Server on Windows)
+    On,
+    /// Disable SSH server (stop and disable OpenSSH Server on Windows)
+    Off,
+    /// Show SSH server status
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -279,6 +295,11 @@ async fn main() -> Result<()> {
             rsa,
             key,
         } => commands::sync::run(port, name, timeout, rsa, key).await,
+        Commands::Ssh { action } => match action {
+            SshAction::On => commands::ssh::enable().await,
+            SshAction::Off => commands::ssh::disable().await,
+            SshAction::Status => commands::ssh::status().await,
+        },
     }
 }
 
