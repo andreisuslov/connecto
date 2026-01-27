@@ -34,11 +34,22 @@ Expand-Archive -Path $zipPath -DestinationPath $installDir -Force
 Remove-Item $zipPath
 
 # Add to PATH if not already there
-$userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
-if ($userPath -notlike "*$installDir*") {
-    [Environment]::SetEnvironmentVariable("PATH", "$userPath;$installDir", "User")
-    $env:PATH += ";$installDir"
-    Write-Host "Added $installDir to PATH" -ForegroundColor Green
+# Use Machine PATH when running as Admin (persists for all users including Admin sessions)
+# Use User PATH when running as regular user
+if ($isAdmin) {
+    $machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+    if ($machinePath -notlike "*$installDir*") {
+        [Environment]::SetEnvironmentVariable("PATH", "$machinePath;$installDir", "Machine")
+        $env:PATH += ";$installDir"
+        Write-Host "Added $installDir to system PATH" -ForegroundColor Green
+    }
+} else {
+    $userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
+    if ($userPath -notlike "*$installDir*") {
+        [Environment]::SetEnvironmentVariable("PATH", "$userPath;$installDir", "User")
+        $env:PATH += ";$installDir"
+        Write-Host "Added $installDir to user PATH" -ForegroundColor Green
+    }
 }
 
 # Configure firewall rules for mDNS discovery
