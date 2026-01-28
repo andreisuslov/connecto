@@ -281,6 +281,40 @@ impl KeyManager {
         // This matches what OpenSSH Server expects
         let path_str = path.to_string_lossy();
 
+        // Use icacls which works on all Windows versions (including Server 2012 R2)
+        // 1. Reset and disable inheritance
+        // 2. Grant Administrators full control
+        // 3. Grant SYSTEM full control
+        let commands = [
+            format!("icacls \"{}\" /inheritance:r", path_str),
+            format!("icacls \"{}\" /grant Administrators:F", path_str),
+            format!("icacls \"{}\" /grant SYSTEM:F", path_str),
+        ];
+
+        for cmd in &commands {
+            let output = Command::new("cmd")
+                .args(["/C", cmd])
+                .output();
+
+            if let Ok(out) = output {
+                if !out.status.success() {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    warn!("icacls command failed: {}", stderr);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Unused - keeping for reference. PowerShell ACL method doesn't work on older Windows.
+    #[cfg(target_os = "windows")]
+    #[allow(dead_code)]
+    fn set_windows_admin_key_permissions_powershell(path: &std::path::Path) -> Result<()> {
+        use std::process::Command;
+
+        let path_str = path.to_string_lossy();
+
         let output = Command::new("powershell")
             .args([
                 "-Command",
@@ -303,7 +337,6 @@ impl KeyManager {
             Ok(out) if out.status.success() => Ok(()),
             Ok(out) => {
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                // Log warning but don't fail - key might still work
                 warn!("Could not set ACL on {}: {}", path_str, stderr);
                 Ok(())
             }
