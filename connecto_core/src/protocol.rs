@@ -223,13 +223,9 @@ impl HandshakeServer {
                 }
                 Err(e) => {
                     // Failed handshake (e.g., scanner probe, incomplete connection)
-                    // Log and continue waiting for real pairing requests
-                    warn!("Handshake failed from {}: {} - waiting for next connection", peer_addr, e);
-                    let _ = event_tx
-                        .send(ServerEvent::Error {
-                            message: format!("Incomplete handshake from {}: {}", peer_addr, e),
-                        })
-                        .await;
+                    // This is expected behavior - scanners probe to identify devices
+                    // Log at debug level and continue waiting for real pairing requests
+                    debug!("Incomplete handshake from {} (likely scanner probe): {}", peer_addr, e);
                 }
             }
         }

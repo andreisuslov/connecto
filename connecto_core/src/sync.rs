@@ -552,9 +552,8 @@ impl SyncAdvertiser {
 
     fn stop(&mut self) -> Result<()> {
         if let Some(fullname) = self.service_fullname.take() {
-            self.daemon
-                .unregister(&fullname)
-                .map_err(|e| ConnectoError::Discovery(format!("Failed to unregister: {}", e)))?;
+            // Ignore errors during unregister - the daemon may already be shut down
+            let _ = self.daemon.unregister(&fullname);
             info!("Stopped advertising sync service");
         }
         Ok(())
