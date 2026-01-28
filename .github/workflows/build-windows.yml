@@ -30,8 +30,20 @@ jobs:
           Compress-Archive -Path release/connecto.exe -DestinationPath release/connecto-windows-x86_64.zip
           (Get-FileHash release/connecto-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower() + "  connecto-windows-x86_64.zip" | Out-File -Encoding ASCII release/connecto-windows-x86_64.zip.sha256
 
+      - name: Upload artifacts (backup)
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-binary
+          path: |
+            release/connecto-windows-x86_64.zip
+            release/connecto-windows-x86_64.zip.sha256
+
       - name: Upload to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ inputs.version }}
-        run: gh release upload "$VERSION" release/connecto-windows-x86_64.zip release/connecto-windows-x86_64.zip.sha256 --clobber
+        shell: pwsh
+        run: |
+          Write-Host "Uploading to release $env:VERSION"
+          gh release view $env:VERSION
+          gh release upload $env:VERSION release/connecto-windows-x86_64.zip release/connecto-windows-x86_64.zip.sha256 --clobber
