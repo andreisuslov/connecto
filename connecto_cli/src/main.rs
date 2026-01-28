@@ -242,10 +242,12 @@ async fn main() -> Result<()> {
     // Enable ANSI color support on Windows
     #[cfg(windows)]
     {
-        // Enable virtual terminal processing for ANSI colors (Windows 10 v1511+)
-        // If this fails (older Windows), disable colors entirely to avoid garbage output
-        if colored::control::set_virtual_terminal(true).is_err() {
+        // ANSI escape codes require Windows 10 v1511+ (build 10586+)
+        // On older Windows, disable colors entirely to avoid garbage output
+        if !supports_ansi_colors_windows() {
             colored::control::set_override(false);
+        } else {
+            let _ = colored::control::set_virtual_terminal(true);
         }
     }
 
@@ -1095,5 +1097,31 @@ mod tests {
             }
             _ => panic!("Expected Sync command"),
         }
+    }
+}
+
+/// Check if the Windows version supports ANSI escape codes
+/// Requires Windows 10 version 1511 (build 10586) or later
+#[cfg(windows)]
+fn supports_ansi_colors_windows() -> bool {
+    use std::process::Command;
+
+    // Get Windows build number via PowerShell
+    let output = Command::new("powershell")
+        .args(["-Command", "[Environment]::OSVersion.Version.Build"])
+        .output();
+
+    match output {
+        Ok(out) => {
+            let build_str = String::from_utf8_lossy(&out.stdout);
+            if let Ok(build) = build_str.trim().parse::<u32>() {
+                // Windows 10 v1511 is build 10586, which introduced ANSI support
+                build >= 10586
+            } else {
+                // Can't parse build number, assume no support
+                false
+            }
+        }
+        Err(_) => false,
     }
 }
