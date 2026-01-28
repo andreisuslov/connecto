@@ -145,21 +145,219 @@ async fn enable_windows() -> Result<()> {
 
             println!("{} OpenSSH Server installed.", "✓".green());
         } else {
-            // Older Windows (Server 2012 R2, etc.) - OpenSSH must be installed manually
-            println!("{} OpenSSH Server is not installed.", "✗".red());
-            println!();
-            println!("Your Windows version requires manual OpenSSH installation:");
-            println!();
-            println!("  1. Download OpenSSH from:");
-            println!("     {}", "https://github.com/PowerShell/Win32-OpenSSH/releases".cyan());
-            println!();
-            println!("  2. Extract to C:\\Program Files\\OpenSSH");
-            println!();
-            println!("  3. Run as Administrator:");
-            println!("     {}", "powershell -ExecutionPolicy Bypass -File \"C:\\Program Files\\OpenSSH\\install-sshd.ps1\"".dimmed());
-            println!();
-            println!("  4. Then run {} again.", "connecto ssh on".cyan());
-            return Ok(());
+            // Older Windows (Server 2012 R2, etc.) - search for Win32-OpenSSH installation
+            println!("{} Searching for Win32-OpenSSH installation...", "→".cyan());
+
+            // Search for install-sshd.ps1 in common locations and user directories
+            let search_script = r#"
+                $searchPaths = @(
+                    "$env:ProgramFiles\OpenSSH*",
+                    "${env:ProgramFiles(x86)}\OpenSSH*",
+                    "$env:SystemDrive\OpenSSH*",
+                    "$env:USERPROFILE\Downloads\OpenSSH*",
+                    "$env:USERPROFILE\Desktop\OpenSSH*",
+                    "$env:TEMP\OpenSSH*"
+                )
+                foreach ($pattern in $searchPaths) {
+                    $dirs = Get-Item -Path $pattern -ErrorAction SilentlyContinue
+                    foreach ($dir in $dirs) {
+                        $script = Join-Path $dir.FullName "install-sshd.ps1"
+                        if (Test-Path $script) {
+                            Write-Output $dir.FullName
+                            return
+                        }
+                    }
+                }
+            "#;
+
+            let search_output = Command::new("powershell")
+                .args(["-Command", search_script])
+                .output()?;
+
+            let openssh_path = String::from_utf8_lossy(&search_output.stdout).trim().to_string();
+
+            if !openssh_path.is_empty() {
+                let install_script = format!(r"{}\install-sshd.ps1", openssh_path);
+                println!("{} Found Win32-OpenSSH at: {}", "✓".green(), openssh_path.cyan());
+                println!("{} Running install-sshd.ps1...", "→".cyan());
+
+                let install_output = Command::new("powershell")
+                    .args([
+                        "-ExecutionPolicy", "Bypass",
+                        "-File", &install_script
+                    ])
+                    .output()?;
+
+                if !install_output.status.success() {
+                    let stderr = String::from_utf8_lossy(&install_output.stderr);
+                    let stdout = String::from_utf8_lossy(&install_output.stdout);
+                    println!("{} Failed to run install-sshd.ps1.", "✗".red());
+                    if !stderr.is_empty() {
+                        println!("{}", stderr.dimmed());
+                    }
+                    if !stdout.is_empty() {
+                        println!("{}", stdout.dimmed());
+                    }
+                    return Ok(());
+                }
+
+                println!("{} OpenSSH Server installed from Win32-OpenSSH.", "✓".green());
+
+                // Add OpenSSH to system PATH if not already there
+                let path_script = format!(
+                    r#"
+                    $currentPath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+                    if ($currentPath -notlike "*{}*") {{
+                        [Environment]::SetEnvironmentVariable("PATH", "{};$currentPath", "Machine")
+                        $env:PATH = "{};$env:PATH"
+                    }}
+                    "#,
+                    openssh_path, openssh_path, openssh_path
+                );
+                let _ = Command::new("powershell")
+                    .args(["-Command", &path_script])
+                    .output();
+            } else {
+                // Win32-OpenSSH not found - download and install automatically
+                println!("{} Win32-OpenSSH not found. Downloading...", "→".cyan());
+
+                // Download and extract Win32-OpenSSH from GitHub
+                let download_script = r#"
+                    $ErrorActionPreference = 'Stop'
+
+                    # Determine architecture
+                    $arch = if ([Environment]::Is64BitOperatingSystem) { 'Win64' } else { 'Win32' }
+
+                    # Get latest release from GitHub API
+                    $releasesUrl = 'https://api.github.com/repos/PowerShell/Win32-OpenSSH/releases/latest'
+
+                    # Use appropriate method for older PowerShell
+                    try {
+                        # Try TLS 1.2 for GitHub
+                        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                    } catch {}
+
+                    try {
+                        $release = Invoke-RestMethod -Uri $releasesUrl -UseBasicParsing
+                        $asset = $release.assets | Where-Object { $_.name -like "OpenSSH-$arch*.zip" -and $_.name -notlike '*symbols*' } | Select-Object -First 1
+                        $downloadUrl = $asset.browser_download_url
+                        $fileName = $asset.name
+                    } catch {
+                        # Fallback to known working version if API fails
+                        $version = 'v9.5.0.0p1-Beta'
+                        $fileName = "OpenSSH-$arch.zip"
+                        $downloadUrl = "https://github.com/PowerShell/Win32-OpenSSH/releases/download/$version/$fileName"
+                    }
+
+                    $installDir = "$env:ProgramFiles\OpenSSH"
+                    $tempZip = "$env:TEMP\$fileName"
+
+                    Write-Host "Downloading $fileName..."
+
+                    # Download using WebClient (more compatible with older Windows)
+                    $webClient = New-Object System.Net.WebClient
+                    try {
+                        $webClient.DownloadFile($downloadUrl, $tempZip)
+                    } finally {
+                        $webClient.Dispose()
+                    }
+
+                    Write-Host "Extracting to $installDir..."
+
+                    # Create install directory
+                    if (-not (Test-Path $installDir)) {
+                        New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+                    }
+
+                    # Extract using Shell.Application (works on older Windows without Expand-Archive)
+                    $shell = New-Object -ComObject Shell.Application
+                    $zip = $shell.NameSpace($tempZip)
+                    $dest = $shell.NameSpace($installDir)
+
+                    # The zip contains a folder like OpenSSH-Win64, we need its contents
+                    $innerFolder = $zip.Items() | Select-Object -First 1
+                    if ($innerFolder.IsFolder) {
+                        $innerItems = $shell.NameSpace($innerFolder.Path).Items()
+                        $dest.CopyHere($innerItems, 0x14) # 0x14 = no UI, overwrite
+                    } else {
+                        $dest.CopyHere($zip.Items(), 0x14)
+                    }
+
+                    # Cleanup
+                    Remove-Item $tempZip -Force -ErrorAction SilentlyContinue
+
+                    # Verify installation
+                    if (Test-Path "$installDir\install-sshd.ps1") {
+                        Write-Output $installDir
+                    } else {
+                        throw "Installation verification failed"
+                    }
+                "#;
+
+                let download_output = Command::new("powershell")
+                    .args(["-ExecutionPolicy", "Bypass", "-Command", download_script])
+                    .output()?;
+
+                let download_path = String::from_utf8_lossy(&download_output.stdout)
+                    .lines()
+                    .last()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+
+                if download_output.status.success() && !download_path.is_empty() {
+                    println!("{} Downloaded and extracted to: {}", "✓".green(), download_path.cyan());
+
+                    // Run install-sshd.ps1
+                    let install_script = format!(r"{}\install-sshd.ps1", download_path);
+                    println!("{} Running install-sshd.ps1...", "→".cyan());
+
+                    let install_output = Command::new("powershell")
+                        .args(["-ExecutionPolicy", "Bypass", "-File", &install_script])
+                        .output()?;
+
+                    if !install_output.status.success() {
+                        let stderr = String::from_utf8_lossy(&install_output.stderr);
+                        println!("{} Failed to run install-sshd.ps1.", "✗".red());
+                        if !stderr.is_empty() {
+                            println!("{}", stderr.dimmed());
+                        }
+                        return Ok(());
+                    }
+
+                    println!("{} OpenSSH Server installed.", "✓".green());
+
+                    // Add to PATH
+                    let path_script = format!(
+                        r#"
+                        $currentPath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+                        if ($currentPath -notlike "*{}*") {{
+                            [Environment]::SetEnvironmentVariable("PATH", "{};$currentPath", "Machine")
+                            $env:PATH = "{};$env:PATH"
+                        }}
+                        "#,
+                        download_path, download_path, download_path
+                    );
+                    let _ = Command::new("powershell")
+                        .args(["-Command", &path_script])
+                        .output();
+                } else {
+                    let stderr = String::from_utf8_lossy(&download_output.stderr);
+                    let stdout = String::from_utf8_lossy(&download_output.stdout);
+                    println!("{} Failed to download Win32-OpenSSH.", "✗".red());
+                    if !stderr.is_empty() {
+                        println!("{}", stderr.dimmed());
+                    }
+                    if !stdout.is_empty() {
+                        println!("{}", stdout.dimmed());
+                    }
+                    println!();
+                    println!("You can try manually:");
+                    println!("  1. Download from: {}", "https://github.com/PowerShell/Win32-OpenSSH/releases".cyan());
+                    println!("  2. Extract anywhere and run {} again", "connecto ssh on".cyan());
+                    return Ok(());
+                }
+            }
         }
     }
 
@@ -199,26 +397,51 @@ async fn enable_windows() -> Result<()> {
     // Configure firewall rule
     println!("{} Configuring firewall...", "→".cyan());
 
-    let firewall_output = Command::new("powershell")
-        .args([
-            "-Command",
-            r#"
-            $rule = Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue
-            if (-not $rule) {
-                New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22
-                'created'
-            } else {
-                Enable-NetFirewallRule -Name 'OpenSSH-Server-In-TCP'
-                'enabled'
-            }
-            "#
-        ])
-        .output()?;
+    // Check if modern NetFirewallRule cmdlets are available (Windows 8/Server 2012+)
+    let has_netfirewall = Command::new("powershell")
+        .args(["-Command", "Get-Command Get-NetFirewallRule -ErrorAction SilentlyContinue"])
+        .output()
+        .map(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .unwrap_or(false);
 
-    if firewall_output.status.success() {
+    let firewall_ok = if has_netfirewall {
+        // Modern Windows - use NetFirewallRule cmdlets
+        let firewall_output = Command::new("powershell")
+            .args([
+                "-Command",
+                r#"
+                $rule = Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue
+                if (-not $rule) {
+                    New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22
+                    'created'
+                } else {
+                    Enable-NetFirewallRule -Name 'OpenSSH-Server-In-TCP'
+                    'enabled'
+                }
+                "#
+            ])
+            .output()?;
+        firewall_output.status.success()
+    } else {
+        // Older Windows - use netsh advfirewall
+        let firewall_output = Command::new("netsh")
+            .args([
+                "advfirewall", "firewall", "add", "rule",
+                "name=OpenSSH Server (sshd)",
+                "dir=in",
+                "action=allow",
+                "protocol=TCP",
+                "localport=22"
+            ])
+            .output()?;
+        firewall_output.status.success()
+    };
+
+    if firewall_ok {
         println!("{} Firewall configured for SSH (port 22).", "✓".green());
     } else {
         println!("{} Warning: Could not configure firewall.", "⚠".yellow());
+        println!("  You may need to manually allow TCP port 22 inbound.");
     }
 
     print_success_message();
@@ -306,14 +529,29 @@ async fn status_windows() -> Result<()> {
         }
     }
 
-    // Check firewall
-    let firewall_output = Command::new("powershell")
-        .args(["-Command", "Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Enabled"])
-        .output()?;
+    // Check firewall - try modern cmdlet first, fall back to netsh
+    let has_netfirewall = Command::new("powershell")
+        .args(["-Command", "Get-Command Get-NetFirewallRule -ErrorAction SilentlyContinue"])
+        .output()
+        .map(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .unwrap_or(false);
 
-    let firewall = String::from_utf8_lossy(&firewall_output.stdout).trim().to_string();
+    let firewall_enabled = if has_netfirewall {
+        let firewall_output = Command::new("powershell")
+            .args(["-Command", "Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Enabled"])
+            .output()?;
+        String::from_utf8_lossy(&firewall_output.stdout).trim() == "True"
+    } else {
+        // Check with netsh on older Windows
+        let firewall_output = Command::new("netsh")
+            .args(["advfirewall", "firewall", "show", "rule", "name=OpenSSH Server (sshd)"])
+            .output();
+        firewall_output
+            .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).to_lowercase().contains("yes"))
+            .unwrap_or(false)
+    };
 
-    if firewall == "True" {
+    if firewall_enabled {
         println!("{} Firewall allows SSH (port 22)", "•".green());
     } else {
         println!("{} Firewall rule not configured", "•".yellow());

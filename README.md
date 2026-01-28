@@ -24,28 +24,12 @@ ssh mydesktop  # It just works!
 # macOS
 brew install andreisuslov/connecto/connecto
 
-# Windows (PowerShell as Admin)
-irm https://raw.githubusercontent.com/andreisuslov/connecto/main/install.ps1 | iex
+# Windows (PowerShell as Admin) - works on all Windows versions
+powershell -c "[Net.ServicePointManager]::SecurityProtocol='Tls12';iex(irm https://raw.githubusercontent.com/andreisuslov/connecto/main/install.ps1)"
 
 # From source
 cargo install --path connecto_cli
 ```
-
-<details>
-<summary><b>Windows SSL/TLS Error?</b> (click to expand)</summary>
-
-If you see "could not create SSL/TLS secure channel", run these two commands separately:
-
-```powershell
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-```
-```powershell
-irm https://raw.githubusercontent.com/andreisuslov/connecto/main/install.ps1 | iex
-```
-
-This is needed on older Windows systems (Server 2012, older PowerShell) that don't enable TLS 1.2 by default.
-
-</details>
 
 ## Documentation
 

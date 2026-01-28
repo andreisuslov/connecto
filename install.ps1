@@ -1,6 +1,11 @@
 #!/usr/bin/env pwsh
 # Connecto installer for Windows
-# Usage: irm https://raw.githubusercontent.com/andreisuslov/connecto/main/install.ps1 | iex
+#
+# Usage (works on all Windows versions including older ones):
+#   powershell -c "[Net.ServicePointManager]::SecurityProtocol='Tls12';iex(irm https://raw.githubusercontent.com/andreisuslov/connecto/main/install.ps1)"
+#
+# Or if TLS 1.2 is already enabled (Windows 10+):
+#   irm https://raw.githubusercontent.com/andreisuslov/connecto/main/install.ps1 | iex
 
 $ErrorActionPreference = "Stop"
 
@@ -92,23 +97,28 @@ if ($pathUpdated) {
 if ($isAdmin) {
     Write-Host "Configuring firewall rules..." -ForegroundColor Cyan
 
-    # Remove existing rules if they exist (to avoid duplicates)
-    Remove-NetFirewallRule -DisplayName "Connecto mDNS" -ErrorAction SilentlyContinue
-    Remove-NetFirewallRule -DisplayName "Connecto TCP" -ErrorAction SilentlyContinue
+    # Check if modern NetFirewallRule cmdlets are available
+    $hasNetFirewall = Get-Command New-NetFirewallRule -ErrorAction SilentlyContinue
 
-    # Add firewall rules
-    New-NetFirewallRule -DisplayName "Connecto mDNS" -Direction Inbound -Protocol UDP -LocalPort 5353 -Action Allow | Out-Null
-    New-NetFirewallRule -DisplayName "Connecto TCP" -Direction Inbound -Protocol TCP -LocalPort 8099 -Action Allow | Out-Null
+    if ($hasNetFirewall) {
+        # Modern Windows - use NetFirewallRule cmdlets
+        Remove-NetFirewallRule -DisplayName "Connecto mDNS" -ErrorAction SilentlyContinue
+        Remove-NetFirewallRule -DisplayName "Connecto TCP" -ErrorAction SilentlyContinue
+        New-NetFirewallRule -DisplayName "Connecto mDNS" -Direction Inbound -Protocol UDP -LocalPort 5353 -Action Allow | Out-Null
+        New-NetFirewallRule -DisplayName "Connecto TCP" -Direction Inbound -Protocol TCP -LocalPort 8099 -Action Allow | Out-Null
+    } else {
+        # Older Windows - use netsh advfirewall
+        netsh advfirewall firewall delete rule name="Connecto mDNS" 2>$null
+        netsh advfirewall firewall delete rule name="Connecto TCP" 2>$null
+        netsh advfirewall firewall add rule name="Connecto mDNS" dir=in action=allow protocol=UDP localport=5353 | Out-Null
+        netsh advfirewall firewall add rule name="Connecto TCP" dir=in action=allow protocol=TCP localport=8099 | Out-Null
+    }
 
     Write-Host "Firewall rules configured." -ForegroundColor Green
 } else {
     Write-Host ""
     Write-Host "Warning: Run as Administrator to configure firewall rules for mDNS discovery." -ForegroundColor Yellow
     Write-Host "Without firewall rules, 'connecto scan' may not discover devices." -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "To add firewall rules manually, run PowerShell as Administrator and execute:" -ForegroundColor Yellow
-    Write-Host "  New-NetFirewallRule -DisplayName 'Connecto mDNS' -Direction Inbound -Protocol UDP -LocalPort 5353 -Action Allow" -ForegroundColor Gray
-    Write-Host "  New-NetFirewallRule -DisplayName 'Connecto TCP' -Direction Inbound -Protocol TCP -LocalPort 8099 -Action Allow" -ForegroundColor Gray
 }
 
 Write-Host ""
