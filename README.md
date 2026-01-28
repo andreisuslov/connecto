@@ -41,16 +41,19 @@ Full documentation is available at **[andreisuslov.github.io/connecto](https://a
 - [All Commands](https://andreisuslov.github.io/connecto/commands/listen.html)
 - [Security](https://andreisuslov.github.io/connecto/reference/security.html)
 
-## Windows SSH Setup
+## SSH Server Setup
 
-On Windows, you need to enable the SSH server before other machines can connect:
+Before other machines can SSH into your device, the SSH server must be enabled:
 
-```powershell
-# Run PowerShell as Administrator
-connecto ssh on      # Install and enable OpenSSH Server
+```bash
+connecto ssh on      # Enable SSH server
 connecto ssh status  # Check SSH server status
-connecto ssh off     # Disable SSH server (optional)
+connecto ssh off     # Disable SSH server
 ```
+
+**Platform-specific notes:**
+- **Windows**: Run PowerShell as Administrator
+- **macOS/Linux**: Run with `sudo`
 
 ## Features
 
@@ -59,7 +62,7 @@ connecto ssh off     # Disable SSH server (optional)
 - **Zero-config Pairing** - One command key exchange
 - **Auto SSH Config** - `ssh hostname` just works
 - **Cross-platform** - macOS, Linux, Windows
-- **Windows SSH Management** - Enable/disable OpenSSH Server with one command
+- **SSH Server Management** - Enable/disable SSH server with one command on all platforms
 
 ## License
 

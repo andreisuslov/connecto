@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "connecto_cli"
-version = "0.3.0"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -479,6 +479,7 @@ dependencies = [
  "dialoguer",
  "directories",
  "indicatif",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
@@ -489,7 +490,7 @@ dependencies = [
 
 [[package]]
 name = "connecto_core"
-version = "0.3.0"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "directories",
@@ -511,7 +512,7 @@ dependencies = [
 
 [[package]]
 name = "connecto_gui"
-version = "0.3.0"
+version = "0.3.4"
 dependencies = [
  "connecto_core",
  "serde",
