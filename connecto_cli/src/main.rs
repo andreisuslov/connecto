@@ -242,8 +242,11 @@ async fn main() -> Result<()> {
     // Enable ANSI color support on Windows
     #[cfg(windows)]
     {
-        // Enable virtual terminal processing for ANSI colors
-        let _ = colored::control::set_virtual_terminal(true);
+        // Enable virtual terminal processing for ANSI colors (Windows 10 v1511+)
+        // If this fails (older Windows), disable colors entirely to avoid garbage output
+        if colored::control::set_virtual_terminal(true).is_err() {
+            colored::control::set_override(false);
+        }
     }
 
     let cli = Cli::parse();
