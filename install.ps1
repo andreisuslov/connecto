@@ -33,7 +33,17 @@ New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 # Download and extract
 $zipPath = "$env:TEMP\connecto.zip"
 Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
-Expand-Archive -Path $zipPath -DestinationPath $installDir -Force
+
+# Extract zip - use Expand-Archive if available (PS 5.0+), otherwise use Shell.Application
+if (Get-Command Expand-Archive -ErrorAction SilentlyContinue) {
+    Expand-Archive -Path $zipPath -DestinationPath $installDir -Force
+} else {
+    # Fallback for PowerShell 4.0 and earlier
+    $shell = New-Object -ComObject Shell.Application
+    $zip = $shell.NameSpace($zipPath)
+    $dest = $shell.NameSpace($installDir)
+    $dest.CopyHere($zip.Items(), 0x14) # 0x14 = overwrite + no UI
+}
 Remove-Item $zipPath
 
 # Add to PATH if not already there
