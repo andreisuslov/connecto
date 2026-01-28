@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "connecto_cli"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -490,7 +490,7 @@ dependencies = [
 
 [[package]]
 name = "connecto_core"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "directories",
@@ -512,7 +512,7 @@ dependencies = [
 
 [[package]]
 name = "connecto_gui"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "connecto_core",
  "serde",
