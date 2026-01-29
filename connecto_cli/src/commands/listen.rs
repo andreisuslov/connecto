@@ -4,13 +4,16 @@ use anyhow::Result;
 use colored::Colorize;
 use connecto_core::{
     discovery::{get_hostname, get_local_addresses, ServiceAdvertiser},
-    fallback::AdHocNetwork,
     keys::KeyManager,
     protocol::{HandshakeServer, ServerEvent},
 };
+#[cfg(target_os = "macos")]
+use connecto_core::fallback::AdHocNetwork;
 use tokio::sync::mpsc;
 
-use super::{error, info, success, warn};
+use super::{error, info, success};
+#[cfg(target_os = "macos")]
+use super::warn;
 
 /// Ensure macOS firewall allows incoming connections to connecto
 #[cfg(target_os = "macos")]
