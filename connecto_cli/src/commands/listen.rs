@@ -9,7 +9,89 @@ use connecto_core::{
 };
 use tokio::sync::mpsc;
 
-use super::{error, info, success};
+use super::{error, info, success, warn};
+
+/// Ensure macOS firewall allows incoming connections to connecto
+#[cfg(target_os = "macos")]
+fn ensure_macos_firewall() {
+    use std::process::Command;
+
+    // Check if firewall is enabled
+    let fw_state = Command::new("/usr/libexec/ApplicationFirewall/socketfilterfw")
+        .arg("--getglobalstate")
+        .output();
+
+    let firewall_enabled = fw_state
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("enabled"))
+        .unwrap_or(false);
+
+    if !firewall_enabled {
+        return; // Firewall is off, nothing to do
+    }
+
+    // Get the path to the current executable
+    let exe_path = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    let exe_str = match exe_path.to_str() {
+        Some(s) => s,
+        None => return,
+    };
+
+    // Check if connecto is already allowed
+    let check = Command::new("/usr/libexec/ApplicationFirewall/socketfilterfw")
+        .args(["--getappblocked", exe_str])
+        .output();
+
+    let is_blocked = check
+        .map(|o| {
+            let output = String::from_utf8_lossy(&o.stdout);
+            // If app is not in the list or is blocked, we need to add/unblock it
+            output.contains("blocked") || output.contains("not permitted")
+        })
+        .unwrap_or(true);
+
+    if !is_blocked {
+        return; // Already allowed
+    }
+
+    info("macOS firewall detected - requesting access...");
+
+    // Try to add and unblock using osascript for GUI sudo prompt
+    let script = format!(
+        r#"do shell script "/usr/libexec/ApplicationFirewall/socketfilterfw --add '{}' && /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp '{}'" with administrator privileges"#,
+        exe_str, exe_str
+    );
+
+    let result = Command::new("osascript")
+        .args(["-e", &script])
+        .output();
+
+    match result {
+        Ok(output) if output.status.success() => {
+            success("Firewall exception added for connecto");
+        }
+        _ => {
+            warn("Could not add firewall exception automatically");
+            println!(
+                "  {} Run manually: {}",
+                "→".cyan(),
+                format!(
+                    "sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add '{}' --unblockapp '{}'",
+                    exe_str, exe_str
+                )
+                .dimmed()
+            );
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ensure_macos_firewall() {
+    // No-op on other platforms
+}
 
 pub async fn run(port: u16, name: Option<String>, verify: bool, continuous: bool) -> Result<()> {
     let device_name = name.unwrap_or_else(get_hostname);
@@ -41,6 +123,9 @@ pub async fn run(port: u16, name: Option<String>, verify: bool, continuous: bool
         }
     }
     println!();
+
+    // Ensure firewall allows connecto (macOS)
+    ensure_macos_firewall();
 
     // Start mDNS advertising
     let mut advertiser = ServiceAdvertiser::new()?;
