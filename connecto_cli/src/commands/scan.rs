@@ -3,10 +3,12 @@
 use anyhow::Result;
 use colored::Colorize;
 use connecto_core::discovery::{DiscoveredDevice, ServiceBrowser, SubnetScanner, DEFAULT_PORT};
+#[cfg(target_os = "macos")]
 use connecto_core::fallback::{AdHocNetwork, FallbackHandler};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
 use std::io::Write;
+#[cfg(target_os = "macos")]
 use std::net::IpAddr;
 use std::time::Duration;
 
