@@ -111,34 +111,30 @@ fn ensure_macos_firewall() {
     // No-op on other platforms
 }
 
-#[allow(dead_code)]
 pub async fn run(port: u16, name: Option<String>, verify: bool, continuous: bool) -> Result<()> {
     run_with_adhoc(port, name, verify, continuous, false).await
 }
 
-pub async fn run_with_adhoc(port: u16, name: Option<String>, verify: bool, continuous: bool, adhoc: bool) -> Result<()> {
+pub async fn run_with_adhoc(port: u16, name: Option<String>, verify: bool, continuous: bool, force_adhoc: bool) -> Result<()> {
     let device_name = name.unwrap_or_else(get_hostname);
     let key_manager = KeyManager::new()?;
 
     // Print header
     println!();
-    if adhoc {
-        println!(
-            "{}",
-            "  CONNECTO LISTENER (AD-HOC)  ".on_bright_magenta().white().bold()
-        );
-    } else {
-        println!(
-            "{}",
-            "  CONNECTO LISTENER  ".on_bright_blue().white().bold()
-        );
-    }
+    println!(
+        "{}",
+        "  CONNECTO LISTENER  ".on_bright_blue().white().bold()
+    );
     println!();
 
-    // If ad-hoc mode, create a direct WiFi network
+    // Track if we should try ad-hoc as fallback
     #[cfg(target_os = "macos")]
-    let _adhoc_network: Option<AdHocNetwork> = if adhoc {
-        info("Creating ad-hoc WiFi network...");
+    let mut _adhoc_network: Option<AdHocNetwork> = None;
+
+    // If force_adhoc, create ad-hoc network immediately
+    #[cfg(target_os = "macos")]
+    if force_adhoc {
+        info("Creating ad-hoc WiFi network (forced)...");
         let mut network = AdHocNetwork::new(&device_name);
 
         match network.create_network() {
@@ -149,7 +145,7 @@ pub async fn run_with_adhoc(port: u16, name: Option<String>, verify: bool, conti
                 println!("  {} Join WiFi network '{}'", "1.".cyan(), network_name.cyan());
                 println!("  {} Run 'connecto scan' to find this device", "2.".cyan());
                 println!();
-                Some(network)
+                _adhoc_network = Some(network);
             }
             Err(e) => {
                 warn(&format!("Could not create ad-hoc network automatically: {}", e));
@@ -160,23 +156,20 @@ pub async fn run_with_adhoc(port: u16, name: Option<String>, verify: bool, conti
                 println!("  {} Name it: {}", "3.".cyan(), network.network_name().cyan());
                 println!("  {} Click Create", "4.".cyan());
                 println!();
-                None
             }
         }
-    } else {
-        None
-    };
+    }
 
     // Show local addresses
     let addresses = get_local_addresses();
-    if addresses.is_empty() && !adhoc {
+    if addresses.is_empty() && !force_adhoc {
         error("No network interfaces found");
         return Ok(());
     }
 
     info(&format!("Device name: {}", device_name.cyan()));
     info(&format!("Port: {}", port.to_string().cyan()));
-    if adhoc {
+    if force_adhoc {
         info(&format!("Mode: {}", "Ad-hoc (direct connection)".magenta()));
     }
     println!();
