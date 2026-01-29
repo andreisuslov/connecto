@@ -59,6 +59,10 @@ enum Commands {
         /// Keep listening after first pairing (default: exit after one)
         #[arg(short, long)]
         continuous: bool,
+
+        /// Create an ad-hoc WiFi network (bypasses router, for isolated networks)
+        #[arg(long)]
+        adhoc: bool,
     },
 
     /// Scan the local network for devices running Connecto
@@ -272,7 +276,8 @@ async fn main() -> Result<()> {
             name,
             verify,
             continuous,
-        } => commands::listen::run(port, name, verify, continuous).await,
+            adhoc,
+        } => commands::listen::run_with_adhoc(port, name, verify, continuous, adhoc).await,
         Commands::Scan { timeout, subnet } => {
             commands::scan::run_with_options(timeout, false, subnet).await
         }
@@ -966,11 +971,13 @@ mod tests {
                 name,
                 verify,
                 continuous,
+                adhoc,
             } => {
                 assert_eq!(port, connecto_core::DEFAULT_PORT);
                 assert!(name.is_none());
                 assert!(!verify);
                 assert!(!continuous);
+                assert!(!adhoc);
             }
             _ => panic!("Expected Listen command"),
         }
