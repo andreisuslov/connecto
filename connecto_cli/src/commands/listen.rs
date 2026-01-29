@@ -16,52 +16,47 @@ use super::{error, info, success, warn};
 fn ensure_macos_firewall() {
     use std::process::Command;
 
-    // Check if firewall is enabled (State = 1 means enabled)
-    let fw_state = Command::new("/usr/libexec/ApplicationFirewall/socketfilterfw")
-        .arg("--getglobalstate")
-        .output();
-
-    let firewall_enabled = fw_state
-        .map(|o| {
-            let output = String::from_utf8_lossy(&o.stdout);
-            output.contains("State = 1") || output.contains("Firewall is enabled")
-        })
-        .unwrap_or(false);
-
-    if !firewall_enabled {
-        return; // Firewall is off, nothing to do
-    }
-
-    // Get the path to the current executable
+    // Get the path to the current executable first
     let exe_path = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return,
     };
+
+    // Resolve symlinks to get the real path (important for Homebrew)
+    let exe_path = exe_path.canonicalize().unwrap_or(exe_path);
 
     let exe_str = match exe_path.to_str() {
         Some(s) => s,
         None => return,
     };
 
-    // Check if connecto is already explicitly allowed in the firewall
-    let check = Command::new("/usr/libexec/ApplicationFirewall/socketfilterfw")
-        .arg("--listapps")
+    // Check if firewall is enabled
+    let fw_state = Command::new("/usr/libexec/ApplicationFirewall/socketfilterfw")
+        .arg("--getglobalstate")
         .output();
 
-    let already_allowed = check
-        .map(|o| {
-            let output = String::from_utf8_lossy(&o.stdout);
-            output.contains(exe_str) && output.contains("ALLOW")
-        })
-        .unwrap_or(false);
+    let output = fw_state
+        .as_ref()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
 
-    if already_allowed {
-        return; // Already in the allowed list
+    // Debug: print what we got
+    if std::env::var("CONNECTO_DEBUG").is_ok() {
+        eprintln!("[DEBUG] Firewall state output: {}", output);
+        eprintln!("[DEBUG] Executable path: {}", exe_str);
     }
 
-    info("macOS firewall detected - requesting access...");
+    // Firewall is enabled if output contains "enabled" (case insensitive) or "State = 1"
+    let firewall_enabled = output.to_lowercase().contains("enabled") || output.contains("State = 1");
+
+    if !firewall_enabled {
+        return; // Firewall is off, nothing to do
+    }
+
+    info("macOS firewall is enabled - checking access...");
 
     // Try to add and unblock using osascript for GUI sudo prompt
+    // Always try this - the command is idempotent (safe to run multiple times)
     let script = format!(
         r#"do shell script "/usr/libexec/ApplicationFirewall/socketfilterfw --add '{}' && /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp '{}'" with administrator privileges"#,
         exe_str, exe_str
@@ -75,7 +70,24 @@ fn ensure_macos_firewall() {
         Ok(output) if output.status.success() => {
             success("Firewall exception added for connecto");
         }
-        _ => {
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("User canceled") || stderr.contains("(-128)") {
+                warn("Firewall setup canceled - incoming connections may be blocked");
+            } else {
+                warn("Could not add firewall exception automatically");
+            }
+            println!(
+                "  {} Run manually: {}",
+                "→".cyan(),
+                format!(
+                    "sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add '{}' --unblockapp '{}'",
+                    exe_str, exe_str
+                )
+                .dimmed()
+            );
+        }
+        Err(_) => {
             warn("Could not add firewall exception automatically");
             println!(
                 "  {} Run manually: {}",
