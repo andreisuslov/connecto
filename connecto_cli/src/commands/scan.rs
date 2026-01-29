@@ -13,6 +13,45 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use super::{info, success};
+use std::process::Command as StdCommand;
+
+/// Check if the network appears to be isolated (router blocking device-to-device traffic)
+async fn check_network_isolation() -> bool {
+    // Try to ping a few common local IPs to see if ANY device responds
+    // If only the gateway responds (or nothing), network is likely isolated
+
+    let gateway_responds = tokio::task::spawn_blocking(|| {
+        // Try to ping the gateway (usually .1)
+        StdCommand::new("ping")
+            .args(["-c", "1", "-W", "1", "192.168.0.1"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false);
+
+    let other_device_responds = tokio::task::spawn_blocking(|| {
+        // Try a few random IPs to see if any device responds
+        for i in [2, 10, 20, 50, 100, 150, 200] {
+            let ip = format!("192.168.0.{}", i);
+            if let Ok(output) = StdCommand::new("ping")
+                .args(["-c", "1", "-W", "1", &ip])
+                .output()
+            {
+                if output.status.success() {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+
+    // If gateway responds but no other devices do, network is likely isolated
+    gateway_responds && !other_device_responds
+}
 use crate::config::Config;
 
 /// File to cache discovered devices for the pair command
@@ -170,33 +209,59 @@ pub async fn run_with_options(
     }
 
     if devices.is_empty() {
+        // Check if network might be isolated (can't reach other devices)
+        let network_isolated = check_network_isolation().await;
+
         println!("{}", "No devices found.".yellow());
         println!();
-        println!("{}", "Make sure:".dimmed());
-        println!(
-            "  {} The target device is running 'connecto listen'",
-            "•".dimmed()
-        );
-        println!(
-            "  {} Your firewall allows connections on port 8099",
-            "•".dimmed()
-        );
-        println!();
-        println!(
-            "{}",
-            "If your router blocks device-to-device traffic:".dimmed()
-        );
-        println!(
-            "  {} Run 'connecto listen --adhoc' on the target to create a direct network",
-            "→".cyan()
-        );
-        println!();
-        println!(
-            "{}",
-            "If devices are on different subnets (e.g., VPN):".dimmed()
-        );
-        println!("  {} connecto config add-subnet 10.x.x.0/24", "→".cyan());
-        println!();
+
+        if network_isolated {
+            println!(
+                "{}",
+                "⚠ Network isolation detected - your router is blocking device-to-device traffic."
+                    .yellow()
+                    .bold()
+            );
+            println!();
+            println!("{}", "Quick fix - create a direct WiFi connection:".bold());
+            println!();
+            println!(
+                "  {} On the {} Mac (running 'connecto listen'):",
+                "1.".cyan(),
+                "TARGET".green().bold()
+            );
+            println!("     {} Hold {} + click WiFi icon in menu bar", "•".dimmed(), "Option".cyan());
+            println!("     {} Click '{}'", "•".dimmed(), "Create Network...".cyan());
+            println!("     {} Name it: {} (or any name)", "•".dimmed(), "Connecto".cyan());
+            println!("     {} Click {}", "•".dimmed(), "Create".cyan());
+            println!();
+            println!(
+                "  {} On {} Mac (this one):",
+                "2.".cyan(),
+                "THIS".green().bold()
+            );
+            println!("     {} Click WiFi icon → join the network you just created", "•".dimmed());
+            println!("     {} Run '{}' again", "•".dimmed(), "connecto scan".cyan());
+            println!();
+        } else {
+            println!("{}", "Make sure:".dimmed());
+            println!(
+                "  {} The target device is running 'connecto listen'",
+                "•".dimmed()
+            );
+            println!(
+                "  {} Your firewall allows connections on port 8099",
+                "•".dimmed()
+            );
+            println!();
+            println!(
+                "{}",
+                "If devices are on different subnets (e.g., VPN):".dimmed()
+            );
+            println!("  {} connecto config add-subnet 10.x.x.0/24", "→".cyan());
+            println!();
+        }
+
         println!("{}", "Or pair directly if you know the IP:".dimmed());
         println!("  {} connecto pair <ip>:8099", "→".cyan());
         println!();

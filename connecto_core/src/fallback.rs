@@ -154,29 +154,72 @@ impl AdHocNetwork {
         Ok(())
     }
 
-    /// Scan for connecto ad-hoc networks
+    /// Scan for connecto ad-hoc networks using system_profiler (works on modern macOS)
     pub fn scan_for_networks() -> Result<Vec<String>> {
-        let airport_path = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport";
-
-        let output = Command::new(airport_path)
-            .args(["-s"])
+        // Use system_profiler which works on all macOS versions
+        let output = Command::new("system_profiler")
+            .args(["SPAirPortDataType", "-json"])
             .output()
             .map_err(|e| ConnectoError::Network(format!("Failed to scan networks: {}", e)))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
 
-        let networks: Vec<String> = stdout
-            .lines()
-            .filter_map(|line| {
-                let trimmed = line.trim();
-                if trimmed.starts_with(ADHOC_NETWORK_PREFIX) {
-                    // Extract just the SSID (first column)
-                    Some(trimmed.split_whitespace().next()?.to_string())
-                } else {
-                    None
+        // Parse JSON to find networks starting with our prefix
+        let mut networks = Vec::new();
+
+        // Simple string search for network names (avoiding full JSON parsing dependency)
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            if trimmed.contains(ADHOC_NETWORK_PREFIX) {
+                // Extract the network name from JSON-like format
+                if let Some(start) = trimmed.find(ADHOC_NETWORK_PREFIX) {
+                    let rest = &trimmed[start..];
+                    // Find end of network name (quote or comma)
+                    let end = rest.find(|c| c == '"' || c == ',' || c == ':').unwrap_or(rest.len());
+                    let network_name = rest[..end].trim().to_string();
+                    if !network_name.is_empty() && !networks.contains(&network_name) {
+                        networks.push(network_name);
+                    }
                 }
-            })
-            .collect();
+            }
+        }
+
+        // Also try networksetup to list available networks
+        if networks.is_empty() {
+            if let Ok(output) = Command::new("networksetup")
+                .args(["-listallhardwareports"])
+                .output()
+            {
+                // Get WiFi interface name
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let mut wifi_device = "en0".to_string();
+                let mut found_wifi = false;
+                for line in stdout.lines() {
+                    if line.contains("Wi-Fi") {
+                        found_wifi = true;
+                    } else if found_wifi && line.starts_with("Device:") {
+                        wifi_device = line.replace("Device:", "").trim().to_string();
+                        break;
+                    }
+                }
+
+                // Scan using CoreWLAN via defaults (hacky but works)
+                if let Ok(scan_output) = Command::new("defaults")
+                    .args(["read", "/Library/Preferences/SystemConfiguration/com.apple.airport.preferences", "KnownNetworks"])
+                    .output()
+                {
+                    let scan_stdout = String::from_utf8_lossy(&scan_output.stdout);
+                    for line in scan_stdout.lines() {
+                        if line.contains(ADHOC_NETWORK_PREFIX) {
+                            let trimmed = line.trim().trim_matches(|c| c == '"' || c == ';' || c == '=' || c == '{' || c == '}');
+                            if trimmed.starts_with(ADHOC_NETWORK_PREFIX) && !networks.contains(&trimmed.to_string()) {
+                                networks.push(trimmed.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         debug!("Found {} connecto ad-hoc networks", networks.len());
         Ok(networks)
