@@ -50,6 +50,7 @@
 
 pub mod discovery;
 pub mod error;
+pub mod fallback;
 pub mod keys;
 pub mod protocol;
 pub mod sync;

@@ -3,9 +3,11 @@
 use anyhow::Result;
 use colored::Colorize;
 use connecto_core::discovery::{DiscoveredDevice, ServiceBrowser, SubnetScanner, DEFAULT_PORT};
+use connecto_core::fallback::{AdHocNetwork, FallbackHandler};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
 use std::io::Write;
+use std::net::IpAddr;
 use std::time::Duration;
 
 use super::{info, success};
@@ -94,6 +96,77 @@ pub async fn run_with_options(
         spinner.finish_and_clear();
     };
 
+    // If still no devices, try fallback: scan for ad-hoc networks
+    if devices.is_empty() {
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_style(
+            ProgressStyle::default_spinner()
+                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+                .template("{spinner:.magenta} {msg}")
+                .unwrap(),
+        );
+        spinner.set_message("Scanning for Connecto ad-hoc networks...");
+        spinner.enable_steady_tick(Duration::from_millis(80));
+
+        // Look for connecto ad-hoc networks
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(adhoc_networks) = AdHocNetwork::scan_for_networks() {
+                spinner.finish_and_clear();
+
+                if !adhoc_networks.is_empty() {
+                    info(&format!("Found {} Connecto ad-hoc network(s)", adhoc_networks.len()));
+                    println!();
+
+                    for (i, network) in adhoc_networks.iter().enumerate() {
+                        println!(
+                            "  {} {} {}",
+                            format!("[{}]", i).green().bold(),
+                            "Ad-hoc:".magenta(),
+                            network.cyan().bold()
+                        );
+                    }
+                    println!();
+
+                    // Ask user if they want to join
+                    println!(
+                        "{}",
+                        "These are direct Connecto networks (router bypass).".dimmed()
+                    );
+                    println!(
+                        "  {} connecto scan --join {}",
+                        "→".cyan(),
+                        adhoc_networks.first().unwrap_or(&String::new())
+                    );
+                    println!();
+
+                    // Try to join the first one automatically and scan
+                    let mut handler = FallbackHandler::new("scanner", Duration::from_secs(10));
+                    if let Ok(Some(host_ip)) = handler.establish_fallback_connection(false).await {
+                        info(&format!("Joined ad-hoc network, host at {}", host_ip));
+
+                        // Now try to connect to the host
+                        let device = DiscoveredDevice {
+                            name: adhoc_networks.first().unwrap_or(&"Connecto-Device".to_string()).clone(),
+                            hostname: "adhoc.local.".to_string(),
+                            addresses: vec![host_ip.parse::<IpAddr>().unwrap_or(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 73, 1)))],
+                            port: DEFAULT_PORT,
+                            instance_name: "adhoc._connecto._tcp.local.".to_string(),
+                        };
+                        devices.push(device);
+                    }
+                }
+            } else {
+                spinner.finish_and_clear();
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            spinner.finish_and_clear();
+        }
+    }
+
     if devices.is_empty() {
         println!("{}", "No devices found.".yellow());
         println!();
@@ -105,6 +178,15 @@ pub async fn run_with_options(
         println!(
             "  {} Your firewall allows connections on port 8099",
             "•".dimmed()
+        );
+        println!();
+        println!(
+            "{}",
+            "If your router blocks device-to-device traffic:".dimmed()
+        );
+        println!(
+            "  {} Run 'connecto listen --adhoc' on the target to create a direct network",
+            "→".cyan()
         );
         println!();
         println!(

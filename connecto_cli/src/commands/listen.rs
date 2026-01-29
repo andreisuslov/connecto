@@ -4,6 +4,7 @@ use anyhow::Result;
 use colored::Colorize;
 use connecto_core::{
     discovery::{get_hostname, get_local_addresses, ServiceAdvertiser},
+    fallback::AdHocNetwork,
     keys::KeyManager,
     protocol::{HandshakeServer, ServerEvent},
 };
@@ -107,36 +108,85 @@ fn ensure_macos_firewall() {
     // No-op on other platforms
 }
 
+#[allow(dead_code)]
 pub async fn run(port: u16, name: Option<String>, verify: bool, continuous: bool) -> Result<()> {
+    run_with_adhoc(port, name, verify, continuous, false).await
+}
+
+pub async fn run_with_adhoc(port: u16, name: Option<String>, verify: bool, continuous: bool, adhoc: bool) -> Result<()> {
     let device_name = name.unwrap_or_else(get_hostname);
     let key_manager = KeyManager::new()?;
 
     // Print header
     println!();
-    println!(
-        "{}",
-        "  CONNECTO LISTENER  ".on_bright_blue().white().bold()
-    );
+    if adhoc {
+        println!(
+            "{}",
+            "  CONNECTO LISTENER (AD-HOC)  ".on_bright_magenta().white().bold()
+        );
+    } else {
+        println!(
+            "{}",
+            "  CONNECTO LISTENER  ".on_bright_blue().white().bold()
+        );
+    }
     println!();
+
+    // If ad-hoc mode, create a direct WiFi network
+    #[cfg(target_os = "macos")]
+    let _adhoc_network: Option<AdHocNetwork> = if adhoc {
+        info("Creating ad-hoc WiFi network...");
+        let mut network = AdHocNetwork::new(&device_name);
+
+        match network.create_network() {
+            Ok(network_name) => {
+                success(&format!("Ad-hoc network created: {}", network_name.magenta().bold()));
+                println!();
+                println!("{}", "Other devices can now:".dimmed());
+                println!("  {} Join WiFi network '{}'", "1.".cyan(), network_name.cyan());
+                println!("  {} Run 'connecto scan' to find this device", "2.".cyan());
+                println!();
+                Some(network)
+            }
+            Err(e) => {
+                warn(&format!("Could not create ad-hoc network automatically: {}", e));
+                println!();
+                println!("{}", "To create manually:".dimmed());
+                println!("  {} Hold Option + click WiFi icon in menu bar", "1.".cyan());
+                println!("  {} Click 'Create Network...'", "2.".cyan());
+                println!("  {} Name it: {}", "3.".cyan(), network.network_name().cyan());
+                println!("  {} Click Create", "4.".cyan());
+                println!();
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // Show local addresses
     let addresses = get_local_addresses();
-    if addresses.is_empty() {
+    if addresses.is_empty() && !adhoc {
         error("No network interfaces found");
         return Ok(());
     }
 
     info(&format!("Device name: {}", device_name.cyan()));
     info(&format!("Port: {}", port.to_string().cyan()));
-    println!();
-
-    println!("{}", "Local IP addresses:".bold());
-    for addr in &addresses {
-        if addr.is_ipv4() {
-            println!("  {} {}", "•".green(), addr);
-        }
+    if adhoc {
+        info(&format!("Mode: {}", "Ad-hoc (direct connection)".magenta()));
     }
     println!();
+
+    if !addresses.is_empty() {
+        println!("{}", "Local IP addresses:".bold());
+        for addr in &addresses {
+            if addr.is_ipv4() {
+                println!("  {} {}", "•".green(), addr);
+            }
+        }
+        println!();
+    }
 
     // Ensure firewall allows connecto (macOS)
     ensure_macos_firewall();
