@@ -16,13 +16,16 @@ use super::{error, info, success, warn};
 fn ensure_macos_firewall() {
     use std::process::Command;
 
-    // Check if firewall is enabled
+    // Check if firewall is enabled (State = 1 means enabled)
     let fw_state = Command::new("/usr/libexec/ApplicationFirewall/socketfilterfw")
         .arg("--getglobalstate")
         .output();
 
     let firewall_enabled = fw_state
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("enabled"))
+        .map(|o| {
+            let output = String::from_utf8_lossy(&o.stdout);
+            output.contains("State = 1") || output.contains("Firewall is enabled")
+        })
         .unwrap_or(false);
 
     if !firewall_enabled {
@@ -40,21 +43,20 @@ fn ensure_macos_firewall() {
         None => return,
     };
 
-    // Check if connecto is already allowed
+    // Check if connecto is already explicitly allowed in the firewall
     let check = Command::new("/usr/libexec/ApplicationFirewall/socketfilterfw")
-        .args(["--getappblocked", exe_str])
+        .arg("--listapps")
         .output();
 
-    let is_blocked = check
+    let already_allowed = check
         .map(|o| {
             let output = String::from_utf8_lossy(&o.stdout);
-            // If app is not in the list or is blocked, we need to add/unblock it
-            output.contains("blocked") || output.contains("not permitted")
+            output.contains(exe_str) && output.contains("ALLOW")
         })
-        .unwrap_or(true);
+        .unwrap_or(false);
 
-    if !is_blocked {
-        return; // Already allowed
+    if already_allowed {
+        return; // Already in the allowed list
     }
 
     info("macOS firewall detected - requesting access...");
