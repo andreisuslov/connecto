@@ -41,7 +41,10 @@ fn get_platform() -> &'static str {
 /// Enable SSH server
 pub async fn enable() -> Result<()> {
     println!();
-    println!("{}", "  CONNECTO SSH SETUP  ".on_bright_blue().white().bold());
+    println!(
+        "{}",
+        "  CONNECTO SSH SETUP  ".on_bright_blue().white().bold()
+    );
     println!();
 
     match get_platform() {
@@ -95,7 +98,10 @@ pub async fn status() -> Result<()> {
 
 async fn enable_windows() -> Result<()> {
     if !is_elevated() {
-        println!("{} This command requires Administrator privileges.", "✗".red());
+        println!(
+            "{} This command requires Administrator privileges.",
+            "✗".red()
+        );
         println!();
         println!("Please run PowerShell as Administrator and try again:");
         println!("  {}", "connecto ssh on".cyan());
@@ -110,27 +116,39 @@ async fn enable_windows() -> Result<()> {
 
     // First check if sshd service already exists (works on all Windows versions)
     let service_check = Command::new("powershell")
-        .args(["-Command", "Get-Service sshd -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name"])
+        .args([
+            "-Command",
+            "Get-Service sshd -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name",
+        ])
         .output()?;
 
-    let sshd_exists = !String::from_utf8_lossy(&service_check.stdout).trim().is_empty();
+    let sshd_exists = !String::from_utf8_lossy(&service_check.stdout)
+        .trim()
+        .is_empty();
 
     if sshd_exists {
         println!("{} OpenSSH Server already installed.", "✓".green());
     } else {
         // Try Windows 10/Server 2016+ method first (Add-WindowsCapability)
         let capability_check = Command::new("powershell")
-            .args(["-Command", "Get-Command Add-WindowsCapability -ErrorAction SilentlyContinue"])
+            .args([
+                "-Command",
+                "Get-Command Add-WindowsCapability -ErrorAction SilentlyContinue",
+            ])
             .output()?;
 
-        if capability_check.status.success() && !String::from_utf8_lossy(&capability_check.stdout).trim().is_empty() {
+        if capability_check.status.success()
+            && !String::from_utf8_lossy(&capability_check.stdout)
+                .trim()
+                .is_empty()
+        {
             // Modern Windows - use Add-WindowsCapability
             println!("{} Installing OpenSSH Server...", "→".cyan());
 
             let install_output = Command::new("powershell")
                 .args([
                     "-Command",
-                    "Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0"
+                    "Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0",
                 ])
                 .output()?;
 
@@ -151,7 +169,10 @@ async fn enable_windows() -> Result<()> {
             println!("Your Windows version requires manual OpenSSH installation:");
             println!();
             println!("  1. Download OpenSSH from:");
-            println!("     {}", "https://github.com/PowerShell/Win32-OpenSSH/releases".cyan());
+            println!(
+                "     {}",
+                "https://github.com/PowerShell/Win32-OpenSSH/releases".cyan()
+            );
             println!();
             println!("  2. Extract to C:\\Program Files\\OpenSSH");
             println!();
@@ -187,7 +208,10 @@ async fn enable_windows() -> Result<()> {
     println!("{} Configuring automatic startup...", "→".cyan());
 
     let auto_output = Command::new("powershell")
-        .args(["-Command", "Set-Service -Name sshd -StartupType 'Automatic'"])
+        .args([
+            "-Command",
+            "Set-Service -Name sshd -StartupType 'Automatic'",
+        ])
         .output()?;
 
     if !auto_output.status.success() {
@@ -227,7 +251,10 @@ async fn enable_windows() -> Result<()> {
 
 async fn disable_windows() -> Result<()> {
     if !is_elevated() {
-        println!("{} This command requires Administrator privileges.", "✗".red());
+        println!(
+            "{} This command requires Administrator privileges.",
+            "✗".red()
+        );
         println!();
         println!("Please run PowerShell as Administrator and try again:");
         println!("  {}", "connecto ssh off".cyan());
@@ -238,7 +265,10 @@ async fn disable_windows() -> Result<()> {
 
     // Stop the service
     let stop_output = Command::new("powershell")
-        .args(["-Command", "Stop-Service sshd -ErrorAction SilentlyContinue"])
+        .args([
+            "-Command",
+            "Stop-Service sshd -ErrorAction SilentlyContinue",
+        ])
         .output()?;
 
     if stop_output.status.success() {
@@ -247,7 +277,10 @@ async fn disable_windows() -> Result<()> {
 
     // Disable automatic startup
     let disable_output = Command::new("powershell")
-        .args(["-Command", "Set-Service -Name sshd -StartupType 'Disabled' -ErrorAction SilentlyContinue"])
+        .args([
+            "-Command",
+            "Set-Service -Name sshd -StartupType 'Disabled' -ErrorAction SilentlyContinue",
+        ])
         .output()?;
 
     if disable_output.status.success() {
@@ -263,13 +296,22 @@ async fn disable_windows() -> Result<()> {
 
 async fn status_windows() -> Result<()> {
     let status_output = Command::new("powershell")
-        .args(["-Command", "Get-Service sshd -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Status"])
+        .args([
+            "-Command",
+            "Get-Service sshd -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Status",
+        ])
         .output()?;
 
-    let status = String::from_utf8_lossy(&status_output.stdout).trim().to_string();
+    let status = String::from_utf8_lossy(&status_output.stdout)
+        .trim()
+        .to_string();
 
     if status.is_empty() {
-        println!("{} OpenSSH Server is {}", "•".red(), "not installed".red().bold());
+        println!(
+            "{} OpenSSH Server is {}",
+            "•".red(),
+            "not installed".red().bold()
+        );
         println!();
         println!("Install and enable with: {}", "connecto ssh on".cyan());
         return Ok(());
@@ -280,7 +322,11 @@ async fn status_windows() -> Result<()> {
             println!("{} SSH server is {}", "•".green(), "running".green().bold());
         }
         "Stopped" => {
-            println!("{} SSH server is {}", "•".yellow(), "stopped".yellow().bold());
+            println!(
+                "{} SSH server is {}",
+                "•".yellow(),
+                "stopped".yellow().bold()
+            );
         }
         _ => {
             println!("{} SSH server status: {}", "•".dimmed(), status);
@@ -289,17 +335,26 @@ async fn status_windows() -> Result<()> {
 
     // Check startup type
     let startup_output = Command::new("powershell")
-        .args(["-Command", "Get-Service sshd | Select-Object -ExpandProperty StartType"])
+        .args([
+            "-Command",
+            "Get-Service sshd | Select-Object -ExpandProperty StartType",
+        ])
         .output()?;
 
-    let startup = String::from_utf8_lossy(&startup_output.stdout).trim().to_string();
+    let startup = String::from_utf8_lossy(&startup_output.stdout)
+        .trim()
+        .to_string();
 
     match startup.as_str() {
         "Automatic" => {
             println!("{} Starts automatically on boot", "•".green());
         }
         "Disabled" => {
-            println!("{} Automatic startup is {}", "•".yellow(), "disabled".yellow());
+            println!(
+                "{} Automatic startup is {}",
+                "•".yellow(),
+                "disabled".yellow()
+            );
         }
         _ => {
             println!("{} Startup type: {}", "•".dimmed(), startup);
@@ -311,7 +366,9 @@ async fn status_windows() -> Result<()> {
         .args(["-Command", "Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Enabled"])
         .output()?;
 
-    let firewall = String::from_utf8_lossy(&firewall_output.stdout).trim().to_string();
+    let firewall = String::from_utf8_lossy(&firewall_output.stdout)
+        .trim()
+        .to_string();
 
     if firewall == "True" {
         println!("{} Firewall allows SSH (port 22)", "•".green());
@@ -358,7 +415,8 @@ async fn enable_macos() -> Result<()> {
             }
             println!();
             println!("You can also enable SSH in:");
-            println!("  {} > {} > {}",
+            println!(
+                "  {} > {} > {}",
                 "System Preferences".cyan(),
                 "Sharing".cyan(),
                 "Remote Login".cyan()
@@ -405,20 +463,23 @@ async fn disable_macos() -> Result<()> {
 
 async fn status_macos() -> Result<()> {
     // Check if sshd is running (doesn't require admin)
-    let pgrep_output = Command::new("pgrep")
-        .args(["-x", "sshd"])
-        .output();
+    let pgrep_output = Command::new("pgrep").args(["-x", "sshd"]).output();
 
     let sshd_running = pgrep_output.map(|o| o.status.success()).unwrap_or(false);
 
     if sshd_running {
         println!("{} SSH server is {}", "•".green(), "running".green().bold());
     } else {
-        println!("{} SSH server is {}", "•".yellow(), "not running".yellow().bold());
+        println!(
+            "{} SSH server is {}",
+            "•".yellow(),
+            "not running".yellow().bold()
+        );
         println!();
         println!("Enable with: {}", "sudo connecto ssh on".cyan());
         println!();
-        println!("Or enable in: {} > {} > {}",
+        println!(
+            "Or enable in: {} > {} > {}",
             "System Settings".cyan(),
             "General".cyan(),
             "Sharing > Remote Login".cyan()
@@ -458,9 +519,7 @@ async fn enable_linux() -> Result<()> {
     println!();
 
     // Check if openssh-server is installed
-    let which_output = Command::new("which")
-        .arg("sshd")
-        .output();
+    let which_output = Command::new("which").arg("sshd").output();
 
     let sshd_installed = which_output.map(|o| o.status.success()).unwrap_or(false);
 
@@ -468,8 +527,14 @@ async fn enable_linux() -> Result<()> {
         println!("{} OpenSSH server not found.", "✗".red());
         println!();
         println!("Install it with your package manager:");
-        println!("  {} (Debian/Ubuntu)", "sudo apt install openssh-server".cyan());
-        println!("  {} (Fedora/RHEL)", "sudo dnf install openssh-server".cyan());
+        println!(
+            "  {} (Debian/Ubuntu)",
+            "sudo apt install openssh-server".cyan()
+        );
+        println!(
+            "  {} (Fedora/RHEL)",
+            "sudo dnf install openssh-server".cyan()
+        );
         println!("  {} (Arch)", "sudo pacman -S openssh".cyan());
         return Ok(());
     }
@@ -484,20 +549,16 @@ async fn enable_linux() -> Result<()> {
     if systemctl_exists {
         // Start sshd
         println!("{} Starting SSH service...", "→".cyan());
-        let start_output = Command::new("systemctl")
-            .args(["start", "sshd"])
-            .output();
+        let start_output = Command::new("systemctl").args(["start", "sshd"]).output();
 
         // Try 'ssh' service name if 'sshd' fails (Ubuntu uses 'ssh')
         let start_ok = match start_output {
             Ok(o) if o.status.success() => true,
-            _ => {
-                Command::new("systemctl")
-                    .args(["start", "ssh"])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false)
-            }
+            _ => Command::new("systemctl")
+                .args(["start", "ssh"])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false),
         };
 
         if start_ok {
@@ -509,32 +570,29 @@ async fn enable_linux() -> Result<()> {
 
         // Enable on boot
         println!("{} Configuring automatic startup...", "→".cyan());
-        let enable_output = Command::new("systemctl")
-            .args(["enable", "sshd"])
-            .output();
+        let enable_output = Command::new("systemctl").args(["enable", "sshd"]).output();
 
         let enable_ok = match enable_output {
             Ok(o) if o.status.success() => true,
-            _ => {
-                Command::new("systemctl")
-                    .args(["enable", "ssh"])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false)
-            }
+            _ => Command::new("systemctl")
+                .args(["enable", "ssh"])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false),
         };
 
         if enable_ok {
             println!("{} SSH will start automatically on boot.", "✓".green());
         } else {
-            println!("{} Warning: Could not enable automatic startup.", "⚠".yellow());
+            println!(
+                "{} Warning: Could not enable automatic startup.",
+                "⚠".yellow()
+            );
         }
     } else {
         // Fallback for non-systemd systems
         println!("{} Starting SSH service...", "→".cyan());
-        let output = Command::new("service")
-            .args(["sshd", "start"])
-            .output();
+        let output = Command::new("service").args(["sshd", "start"]).output();
 
         match output {
             Ok(o) if o.status.success() => {
@@ -542,9 +600,7 @@ async fn enable_linux() -> Result<()> {
             }
             _ => {
                 // Try 'ssh' service name
-                let output2 = Command::new("service")
-                    .args(["ssh", "start"])
-                    .output();
+                let output2 = Command::new("service").args(["ssh", "start"]).output();
 
                 if output2.map(|o| o.status.success()).unwrap_or(false) {
                     println!("{} SSH service started.", "✓".green());
@@ -579,31 +635,19 @@ async fn disable_linux() -> Result<()> {
 
     if systemctl_exists {
         // Stop sshd
-        let _ = Command::new("systemctl")
-            .args(["stop", "sshd"])
-            .output();
-        let _ = Command::new("systemctl")
-            .args(["stop", "ssh"])
-            .output();
+        let _ = Command::new("systemctl").args(["stop", "sshd"]).output();
+        let _ = Command::new("systemctl").args(["stop", "ssh"]).output();
 
         println!("{} SSH service stopped.", "✓".green());
 
         // Disable on boot
-        let _ = Command::new("systemctl")
-            .args(["disable", "sshd"])
-            .output();
-        let _ = Command::new("systemctl")
-            .args(["disable", "ssh"])
-            .output();
+        let _ = Command::new("systemctl").args(["disable", "sshd"]).output();
+        let _ = Command::new("systemctl").args(["disable", "ssh"]).output();
 
         println!("{} SSH automatic startup disabled.", "✓".green());
     } else {
-        let _ = Command::new("service")
-            .args(["sshd", "stop"])
-            .output();
-        let _ = Command::new("service")
-            .args(["ssh", "stop"])
-            .output();
+        let _ = Command::new("service").args(["sshd", "stop"]).output();
+        let _ = Command::new("service").args(["ssh", "stop"]).output();
 
         println!("{} SSH service stopped.", "✓".green());
     }
@@ -643,7 +687,11 @@ async fn status_linux() -> Result<()> {
         if is_active {
             println!("{} SSH server is {}", "•".green(), "running".green().bold());
         } else {
-            println!("{} SSH server is {}", "•".yellow(), "stopped".yellow().bold());
+            println!(
+                "{} SSH server is {}",
+                "•".yellow(),
+                "stopped".yellow().bold()
+            );
         }
 
         // Check if enabled on boot
@@ -653,40 +701,42 @@ async fn status_linux() -> Result<()> {
 
         let is_enabled = match enabled_output {
             Ok(o) => String::from_utf8_lossy(&o.stdout).trim() == "enabled",
-            Err(_) => {
-                Command::new("systemctl")
-                    .args(["is-enabled", "ssh"])
-                    .output()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "enabled")
-                    .unwrap_or(false)
-            }
+            Err(_) => Command::new("systemctl")
+                .args(["is-enabled", "ssh"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "enabled")
+                .unwrap_or(false),
         };
 
         if is_enabled {
             println!("{} Starts automatically on boot", "•".green());
         } else {
-            println!("{} Automatic startup is {}", "•".yellow(), "disabled".yellow());
+            println!(
+                "{} Automatic startup is {}",
+                "•".yellow(),
+                "disabled".yellow()
+            );
         }
     } else {
         // Fallback: check if sshd process is running
-        let pgrep_output = Command::new("pgrep")
-            .args(["-x", "sshd"])
-            .output();
+        let pgrep_output = Command::new("pgrep").args(["-x", "sshd"]).output();
 
         match pgrep_output {
             Ok(out) if out.status.success() => {
                 println!("{} SSH server is {}", "•".green(), "running".green().bold());
             }
             _ => {
-                println!("{} SSH server is {}", "•".yellow(), "not running".yellow().bold());
+                println!(
+                    "{} SSH server is {}",
+                    "•".yellow(),
+                    "not running".yellow().bold()
+                );
             }
         }
     }
 
     // Check if port 22 is listening
-    let ss_output = Command::new("ss")
-        .args(["-tlnp"])
-        .output();
+    let ss_output = Command::new("ss").args(["-tlnp"]).output();
 
     if let Ok(out) = ss_output {
         let output = String::from_utf8_lossy(&out.stdout);

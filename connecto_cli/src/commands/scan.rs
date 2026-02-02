@@ -156,7 +156,10 @@ pub async fn run_with_options(
                 spinner.finish_and_clear();
 
                 if !adhoc_networks.is_empty() {
-                    info(&format!("Found {} Connecto ad-hoc network(s)", adhoc_networks.len()));
+                    info(&format!(
+                        "Found {} Connecto ad-hoc network(s)",
+                        adhoc_networks.len()
+                    ));
                     println!();
 
                     for (i, network) in adhoc_networks.iter().enumerate() {
@@ -188,9 +191,14 @@ pub async fn run_with_options(
 
                         // Now try to connect to the host
                         let device = DiscoveredDevice {
-                            name: adhoc_networks.first().unwrap_or(&"Connecto-Device".to_string()).clone(),
+                            name: adhoc_networks
+                                .first()
+                                .unwrap_or(&"Connecto-Device".to_string())
+                                .clone(),
                             hostname: "adhoc.local.".to_string(),
-                            addresses: vec![host_ip.parse::<IpAddr>().unwrap_or(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 73, 1)))],
+                            addresses: vec![host_ip
+                                .parse::<IpAddr>()
+                                .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 73, 1)))],
                             port: DEFAULT_PORT,
                             instance_name: "adhoc._connecto._tcp.local.".to_string(),
                         };
@@ -230,9 +238,21 @@ pub async fn run_with_options(
                 "1.".cyan(),
                 "TARGET".green().bold()
             );
-            println!("     {} Hold {} + click WiFi icon in menu bar", "•".dimmed(), "Option".cyan());
-            println!("     {} Click '{}'", "•".dimmed(), "Create Network...".cyan());
-            println!("     {} Name it: {} (or any name)", "•".dimmed(), "Connecto".cyan());
+            println!(
+                "     {} Hold {} + click WiFi icon in menu bar",
+                "•".dimmed(),
+                "Option".cyan()
+            );
+            println!(
+                "     {} Click '{}'",
+                "•".dimmed(),
+                "Create Network...".cyan()
+            );
+            println!(
+                "     {} Name it: {} (or any name)",
+                "•".dimmed(),
+                "Connecto".cyan()
+            );
             println!("     {} Click {}", "•".dimmed(), "Create".cyan());
             println!();
             println!(
@@ -240,8 +260,15 @@ pub async fn run_with_options(
                 "2.".cyan(),
                 "THIS".green().bold()
             );
-            println!("     {} Click WiFi icon → join the network you just created", "•".dimmed());
-            println!("     {} Run '{}' again", "•".dimmed(), "connecto scan".cyan());
+            println!(
+                "     {} Click WiFi icon → join the network you just created",
+                "•".dimmed()
+            );
+            println!(
+                "     {} Run '{}' again",
+                "•".dimmed(),
+                "connecto scan".cyan()
+            );
             println!();
         } else {
             println!("{}", "Make sure:".dimmed());

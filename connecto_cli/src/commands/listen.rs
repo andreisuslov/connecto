@@ -2,18 +2,18 @@
 
 use anyhow::Result;
 use colored::Colorize;
+#[cfg(target_os = "macos")]
+use connecto_core::fallback::AdHocNetwork;
 use connecto_core::{
     discovery::{get_hostname, get_local_addresses, ServiceAdvertiser},
     keys::KeyManager,
     protocol::{HandshakeServer, ServerEvent},
 };
-#[cfg(target_os = "macos")]
-use connecto_core::fallback::AdHocNetwork;
 use tokio::sync::mpsc;
 
-use super::{error, info, success};
 #[cfg(target_os = "macos")]
 use super::warn;
+use super::{error, info, success};
 
 /// Ensure macOS firewall allows incoming connections to connecto
 #[cfg(target_os = "macos")]
@@ -51,7 +51,8 @@ fn ensure_macos_firewall() {
     }
 
     // Firewall is enabled if output contains "enabled" (case insensitive) or "State = 1"
-    let firewall_enabled = output.to_lowercase().contains("enabled") || output.contains("State = 1");
+    let firewall_enabled =
+        output.to_lowercase().contains("enabled") || output.contains("State = 1");
 
     if !firewall_enabled {
         return; // Firewall is off, nothing to do
@@ -66,9 +67,7 @@ fn ensure_macos_firewall() {
         exe_str, exe_str
     );
 
-    let result = Command::new("osascript")
-        .args(["-e", &script])
-        .output();
+    let result = Command::new("osascript").args(["-e", &script]).output();
 
     match result {
         Ok(output) if output.status.success() => {
@@ -115,7 +114,13 @@ pub async fn run(port: u16, name: Option<String>, verify: bool, continuous: bool
     run_with_adhoc(port, name, verify, continuous, false).await
 }
 
-pub async fn run_with_adhoc(port: u16, name: Option<String>, verify: bool, continuous: bool, force_adhoc: bool) -> Result<()> {
+pub async fn run_with_adhoc(
+    port: u16,
+    name: Option<String>,
+    verify: bool,
+    continuous: bool,
+    force_adhoc: bool,
+) -> Result<()> {
     let device_name = name.unwrap_or_else(get_hostname);
     let key_manager = KeyManager::new()?;
 
@@ -139,21 +144,38 @@ pub async fn run_with_adhoc(port: u16, name: Option<String>, verify: bool, conti
 
         match network.create_network() {
             Ok(network_name) => {
-                success(&format!("Ad-hoc network created: {}", network_name.magenta().bold()));
+                success(&format!(
+                    "Ad-hoc network created: {}",
+                    network_name.magenta().bold()
+                ));
                 println!();
                 println!("{}", "Other devices can now:".dimmed());
-                println!("  {} Join WiFi network '{}'", "1.".cyan(), network_name.cyan());
+                println!(
+                    "  {} Join WiFi network '{}'",
+                    "1.".cyan(),
+                    network_name.cyan()
+                );
                 println!("  {} Run 'connecto scan' to find this device", "2.".cyan());
                 println!();
                 _adhoc_network = Some(network);
             }
             Err(e) => {
-                warn(&format!("Could not create ad-hoc network automatically: {}", e));
+                warn(&format!(
+                    "Could not create ad-hoc network automatically: {}",
+                    e
+                ));
                 println!();
                 println!("{}", "To create manually:".dimmed());
-                println!("  {} Hold Option + click WiFi icon in menu bar", "1.".cyan());
+                println!(
+                    "  {} Hold Option + click WiFi icon in menu bar",
+                    "1.".cyan()
+                );
                 println!("  {} Click 'Create Network...'", "2.".cyan());
-                println!("  {} Name it: {}", "3.".cyan(), network.network_name().cyan());
+                println!(
+                    "  {} Name it: {}",
+                    "3.".cyan(),
+                    network.network_name().cyan()
+                );
                 println!("  {} Click Create", "4.".cyan());
                 println!();
             }

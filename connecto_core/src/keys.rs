@@ -292,9 +292,7 @@ impl KeyManager {
         ];
 
         for cmd in &commands {
-            let output = Command::new("cmd")
-                .args(["/C", cmd])
-                .output();
+            let output = Command::new("cmd").args(["/C", cmd]).output();
 
             if let Ok(out) = output {
                 if !out.status.success() {

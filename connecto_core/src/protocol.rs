@@ -225,7 +225,10 @@ impl HandshakeServer {
                     // Failed handshake (e.g., scanner probe, incomplete connection)
                     // This is expected behavior - scanners probe to identify devices
                     // Log at debug level and continue waiting for real pairing requests
-                    debug!("Incomplete handshake from {} (likely scanner probe): {}", peer_addr, e);
+                    debug!(
+                        "Incomplete handshake from {} (likely scanner probe): {}",
+                        peer_addr, e
+                    );
                 }
             }
         }
@@ -303,7 +306,8 @@ async fn handle_client(
 
     // Read KeyExchange with timeout (handles scanner probes that disconnect after HelloAck)
     line.clear();
-    let read_result = tokio::time::timeout(Duration::from_secs(30), reader.read_line(&mut line)).await;
+    let read_result =
+        tokio::time::timeout(Duration::from_secs(30), reader.read_line(&mut line)).await;
 
     match read_result {
         Ok(Ok(0)) | Err(_) => {
@@ -313,7 +317,10 @@ async fn handle_client(
             ));
         }
         Ok(Err(e)) => {
-            return Err(ConnectoError::Network(format!("Failed to read KeyExchange: {}", e)));
+            return Err(ConnectoError::Network(format!(
+                "Failed to read KeyExchange: {}",
+                e
+            )));
         }
         Ok(Ok(_)) => {
             // Successfully read data, continue

@@ -83,9 +83,7 @@ impl AdHocNetwork {
         let airport_path = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport";
 
         // First, disassociate from current network
-        let _ = Command::new(airport_path)
-            .args(["-z"])
-            .output();
+        let _ = Command::new(airport_path).args(["-z"]).output();
 
         // Create IBSS (ad-hoc) network
         // Note: Modern macOS has limited support for this, so we'll try multiple approaches
@@ -96,7 +94,10 @@ impl AdHocNetwork {
         match result {
             Ok(output) if output.status.success() => {
                 self.is_hosting = true;
-                info!("Ad-hoc network '{}' created successfully", self.network_name);
+                info!(
+                    "Ad-hoc network '{}' created successfully",
+                    self.network_name
+                );
 
                 // Configure a static IP for the ad-hoc network
                 let _ = self.configure_adhoc_ip("192.168.73.1");
@@ -175,7 +176,9 @@ impl AdHocNetwork {
                 if let Some(start) = trimmed.find(ADHOC_NETWORK_PREFIX) {
                     let rest = &trimmed[start..];
                     // Find end of network name (quote or comma)
-                    let end = rest.find(|c| c == '"' || c == ',' || c == ':').unwrap_or(rest.len());
+                    let end = rest
+                        .find(|c| c == '"' || c == ',' || c == ':')
+                        .unwrap_or(rest.len());
                     let network_name = rest[..end].trim().to_string();
                     if !network_name.is_empty() && !networks.contains(&network_name) {
                         networks.push(network_name);
@@ -205,14 +208,22 @@ impl AdHocNetwork {
 
                 // Scan using CoreWLAN via defaults (hacky but works)
                 if let Ok(scan_output) = Command::new("defaults")
-                    .args(["read", "/Library/Preferences/SystemConfiguration/com.apple.airport.preferences", "KnownNetworks"])
+                    .args([
+                        "read",
+                        "/Library/Preferences/SystemConfiguration/com.apple.airport.preferences",
+                        "KnownNetworks",
+                    ])
                     .output()
                 {
                     let scan_stdout = String::from_utf8_lossy(&scan_output.stdout);
                     for line in scan_stdout.lines() {
                         if line.contains(ADHOC_NETWORK_PREFIX) {
-                            let trimmed = line.trim().trim_matches(|c| c == '"' || c == ';' || c == '=' || c == '{' || c == '}');
-                            if trimmed.starts_with(ADHOC_NETWORK_PREFIX) && !networks.contains(&trimmed.to_string()) {
+                            let trimmed = line.trim().trim_matches(|c| {
+                                c == '"' || c == ';' || c == '=' || c == '{' || c == '}'
+                            });
+                            if trimmed.starts_with(ADHOC_NETWORK_PREFIX)
+                                && !networks.contains(&trimmed.to_string())
+                            {
                                 networks.push(trimmed.to_string());
                             }
                         }
@@ -247,7 +258,10 @@ impl AdHocNetwork {
             Ok(())
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(ConnectoError::Network(format!("Failed to join network: {}", stderr)))
+            Err(ConnectoError::Network(format!(
+                "Failed to join network: {}",
+                stderr
+            )))
         }
     }
 
@@ -311,7 +325,10 @@ impl FallbackHandler {
     /// Try to establish connectivity using fallback methods
     /// Returns the IP address to use for connection if successful
     #[cfg(target_os = "macos")]
-    pub async fn establish_fallback_connection(&mut self, is_listener: bool) -> Result<Option<String>> {
+    pub async fn establish_fallback_connection(
+        &mut self,
+        is_listener: bool,
+    ) -> Result<Option<String>> {
         if is_listener {
             // Listener: Create an ad-hoc network
             if let Some(ref mut adhoc) = self.adhoc {
@@ -348,7 +365,10 @@ impl FallbackHandler {
     }
 
     #[cfg(not(target_os = "macos"))]
-    pub async fn establish_fallback_connection(&mut self, _is_listener: bool) -> Result<Option<String>> {
+    pub async fn establish_fallback_connection(
+        &mut self,
+        _is_listener: bool,
+    ) -> Result<Option<String>> {
         // Ad-hoc networking not yet implemented for other platforms
         Ok(None)
     }
@@ -368,6 +388,7 @@ impl FallbackHandler {
 }
 
 #[cfg(test)]
+#[cfg(target_os = "macos")]
 mod tests {
     use super::*;
 
