@@ -121,18 +121,27 @@ impl SshKeyPair {
 /// Manager for SSH key files on disk
 pub struct KeyManager {
     ssh_dir: PathBuf,
+    /// Whether a custom directory was provided (used on Windows to skip admin path handling in tests)
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    use_custom_dir: bool,
 }
 
 impl KeyManager {
     /// Create a new KeyManager with the default SSH directory
     pub fn new() -> Result<Self> {
         let ssh_dir = Self::default_ssh_dir()?;
-        Ok(Self { ssh_dir })
+        Ok(Self {
+            ssh_dir,
+            use_custom_dir: false,
+        })
     }
 
     /// Create a KeyManager with a custom SSH directory (useful for testing)
     pub fn with_dir(ssh_dir: PathBuf) -> Self {
-        Self { ssh_dir }
+        Self {
+            ssh_dir,
+            use_custom_dir: true,
+        }
     }
 
     /// Get the default SSH directory path
@@ -182,11 +191,12 @@ impl KeyManager {
     }
 
     /// Get the path to authorized_keys file
-    /// On Windows, admin users require a different path
+    /// On Windows, admin users require a different path (unless using a custom directory)
     pub fn authorized_keys_path(&self) -> PathBuf {
         #[cfg(target_os = "windows")]
         {
-            if Self::is_windows_admin() {
+            // Only use admin path for default SSH directory, not custom dirs (e.g., in tests)
+            if !self.use_custom_dir && Self::is_windows_admin() {
                 // Windows OpenSSH Server uses a special path for admin users
                 PathBuf::from(r"C:\ProgramData\ssh\administrators_authorized_keys")
             } else {
