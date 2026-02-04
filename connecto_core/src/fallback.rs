@@ -5,7 +5,8 @@
 //! - (Future) Bluetooth discovery
 
 #[cfg(target_os = "macos")]
-use crate::error::{ConnectoError, Result};
+use crate::error::ConnectoError;
+use crate::error::Result;
 #[cfg(target_os = "macos")]
 use std::process::Command;
 use std::time::Duration;
@@ -179,9 +180,7 @@ impl AdHocNetwork {
                 if let Some(start) = trimmed.find(ADHOC_NETWORK_PREFIX) {
                     let rest = &trimmed[start..];
                     // Find end of network name (quote or comma)
-                    let end = rest
-                        .find(['"', ',', ':'])
-                        .unwrap_or(rest.len());
+                    let end = rest.find(['"', ',', ':']).unwrap_or(rest.len());
                     let network_name = rest[..end].trim().to_string();
                     if !network_name.is_empty() && !networks.contains(&network_name) {
                         networks.push(network_name);
@@ -318,7 +317,10 @@ pub struct FallbackHandler {
 
 impl FallbackHandler {
     /// Create a new fallback handler
-    pub fn new(#[cfg_attr(not(target_os = "macos"), allow(unused_variables))] device_name: &str, timeout: Duration) -> Self {
+    pub fn new(
+        #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] device_name: &str,
+        timeout: Duration,
+    ) -> Self {
         Self {
             #[cfg(target_os = "macos")]
             adhoc: Some(AdHocNetwork::new(device_name)),
