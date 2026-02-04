@@ -4,9 +4,12 @@
 //! - Ad-hoc WiFi network creation and joining
 //! - (Future) Bluetooth discovery
 
+#[cfg(target_os = "macos")]
 use crate::error::{ConnectoError, Result};
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::time::Duration;
+#[cfg(target_os = "macos")]
 use tracing::{debug, info, warn};
 
 /// The prefix for connecto ad-hoc network names
@@ -74,7 +77,7 @@ impl AdHocNetwork {
 
         // Create the ad-hoc network using networksetup
         // On macOS, we use the "ibss" (ad-hoc) mode
-        let output = Command::new("networksetup")
+        let _output = Command::new("networksetup")
             .args(["-createnetworkservice", &self.network_name, "en0"])
             .output();
 
@@ -120,16 +123,16 @@ impl AdHocNetwork {
     /// Alternative method to create ad-hoc network using System Preferences automation
     fn create_network_alternative(&mut self) -> Result<String> {
         // Use osascript to automate the GUI method
-        let script = format!(
-            r#"
+        // Note: This script is kept for future implementation but currently unused
+        // as modern macOS requires more complex approaches
+        let _script = r#"
             tell application "System Events"
                 tell process "SystemUIServer"
                     -- This approach is fragile and may not work on all macOS versions
                     -- It's a fallback for when airport --ibss doesn't work
                 end tell
             end tell
-            "#
-        );
+            "#;
 
         // For now, return an error suggesting manual creation
         // Full automation would require more complex AppleScript or using CoreWLAN directly
@@ -177,7 +180,7 @@ impl AdHocNetwork {
                     let rest = &trimmed[start..];
                     // Find end of network name (quote or comma)
                     let end = rest
-                        .find(|c| c == '"' || c == ',' || c == ':')
+                        .find(['"', ',', ':'])
                         .unwrap_or(rest.len());
                     let network_name = rest[..end].trim().to_string();
                     if !network_name.is_empty() && !networks.contains(&network_name) {
@@ -193,15 +196,15 @@ impl AdHocNetwork {
                 .args(["-listallhardwareports"])
                 .output()
             {
-                // Get WiFi interface name
+                // Get WiFi interface name (for future use)
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                let mut wifi_device = "en0".to_string();
+                let mut _wifi_device = "en0".to_string();
                 let mut found_wifi = false;
                 for line in stdout.lines() {
                     if line.contains("Wi-Fi") {
                         found_wifi = true;
                     } else if found_wifi && line.starts_with("Device:") {
-                        wifi_device = line.replace("Device:", "").trim().to_string();
+                        _wifi_device = line.replace("Device:", "").trim().to_string();
                         break;
                     }
                 }
@@ -309,12 +312,13 @@ impl Drop for AdHocNetwork {
 pub struct FallbackHandler {
     #[cfg(target_os = "macos")]
     adhoc: Option<AdHocNetwork>,
+    #[allow(dead_code)]
     timeout: Duration,
 }
 
 impl FallbackHandler {
     /// Create a new fallback handler
-    pub fn new(device_name: &str, timeout: Duration) -> Self {
+    pub fn new(#[cfg_attr(not(target_os = "macos"), allow(unused_variables))] device_name: &str, timeout: Duration) -> Self {
         Self {
             #[cfg(target_os = "macos")]
             adhoc: Some(AdHocNetwork::new(device_name)),

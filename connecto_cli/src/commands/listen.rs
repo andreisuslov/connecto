@@ -110,10 +110,6 @@ fn ensure_macos_firewall() {
     // No-op on other platforms
 }
 
-pub async fn run(port: u16, name: Option<String>, verify: bool, continuous: bool) -> Result<()> {
-    run_with_adhoc(port, name, verify, continuous, false).await
-}
-
 pub async fn run_with_adhoc(
     port: u16,
     name: Option<String>,
