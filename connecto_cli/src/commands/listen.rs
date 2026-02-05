@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use colored::Colorize;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use connecto_core::fallback::AdHocNetwork;
 use connecto_core::{
     discovery::{get_hostname, get_local_addresses, ServiceAdvertiser},
@@ -11,7 +11,7 @@ use connecto_core::{
 };
 use tokio::sync::mpsc;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use super::warn;
 use super::{error, info, success};
 
@@ -129,11 +129,11 @@ pub async fn run_with_adhoc(
     println!();
 
     // Track if we should try ad-hoc as fallback
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     let mut _adhoc_network: Option<AdHocNetwork> = None;
 
     // If force_adhoc, create ad-hoc network immediately
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     if force_adhoc {
         info("Creating ad-hoc WiFi network (forced)...");
         let mut network = AdHocNetwork::new(&device_name);
@@ -152,6 +152,12 @@ pub async fn run_with_adhoc(
                     network_name.cyan()
                 );
                 println!("  {} Run 'connecto scan' to find this device", "2.".cyan());
+                #[cfg(target_os = "windows")]
+                println!(
+                    "  {} Password: {}",
+                    "3.".cyan(),
+                    network.password().cyan()
+                );
                 println!();
                 _adhoc_network = Some(network);
             }
@@ -161,18 +167,50 @@ pub async fn run_with_adhoc(
                     e
                 ));
                 println!();
-                println!("{}", "To create manually:".dimmed());
-                println!(
-                    "  {} Hold Option + click WiFi icon in menu bar",
-                    "1.".cyan()
-                );
-                println!("  {} Click 'Create Network...'", "2.".cyan());
-                println!(
-                    "  {} Name it: {}",
-                    "3.".cyan(),
-                    network.network_name().cyan()
-                );
-                println!("  {} Click Create", "4.".cyan());
+                #[cfg(target_os = "macos")]
+                {
+                    println!("{}", "To create manually:".dimmed());
+                    println!(
+                        "  {} Hold Option + click WiFi icon in menu bar",
+                        "1.".cyan()
+                    );
+                    println!("  {} Click 'Create Network...'", "2.".cyan());
+                    println!(
+                        "  {} Name it: {}",
+                        "3.".cyan(),
+                        network.network_name().cyan()
+                    );
+                    println!("  {} Click Create", "4.".cyan());
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    println!("{}", "To create manually:".dimmed());
+                    println!(
+                        "  {} Run: nmcli con add type wifi ifname wlan0 mode adhoc ssid \"{}\"",
+                        "1.".cyan(),
+                        network.network_name()
+                    );
+                    println!(
+                        "  {} Configure: nmcli con modify \"{}\" ipv4.method manual ipv4.addresses 192.168.73.1/24",
+                        "2.".cyan(),
+                        network.network_name()
+                    );
+                    println!(
+                        "  {} Activate: nmcli con up \"{}\"",
+                        "3.".cyan(),
+                        network.network_name()
+                    );
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    println!("{}", "To create manually (run as Administrator):".dimmed());
+                    println!(
+                        "  {} netsh wlan set hostednetwork mode=allow ssid=\"{}\" key=\"yourpassword\"",
+                        "1.".cyan(),
+                        network.network_name()
+                    );
+                    println!("  {} netsh wlan start hostednetwork", "2.".cyan());
+                }
                 println!();
             }
         }
