@@ -3,12 +3,12 @@
 use anyhow::Result;
 use colored::Colorize;
 use connecto_core::discovery::{DiscoveredDevice, ServiceBrowser, SubnetScanner, DEFAULT_PORT};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use connecto_core::fallback::{AdHocNetwork, FallbackHandler};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
 use std::io::Write;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -150,7 +150,7 @@ pub async fn run_with_options(
         spinner.enable_steady_tick(Duration::from_millis(80));
 
         // Look for connecto ad-hoc networks
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         {
             if let Ok(adhoc_networks) = AdHocNetwork::scan_for_networks() {
                 spinner.finish_and_clear();
@@ -210,7 +210,7 @@ pub async fn run_with_options(
             }
         }
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         {
             spinner.finish_and_clear();
         }
