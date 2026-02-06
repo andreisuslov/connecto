@@ -281,13 +281,12 @@ impl AdHocNetwork {
     /// Try to create ad-hoc network using networksetup commands
     fn try_networksetup_adhoc(&self) -> bool {
         // Get the WiFi interface name
-        let interface = self.get_wifi_interface().unwrap_or_else(|| "en0".to_string());
+        let interface = self
+            .get_wifi_interface()
+            .unwrap_or_else(|| "en0".to_string());
 
         // Try using wdutil (available on newer macOS)
-        if let Ok(output) = Command::new("wdutil")
-            .args(["info"])
-            .output()
-        {
+        if let Ok(output) = Command::new("wdutil").args(["info"]).output() {
             if output.status.success() {
                 debug!("wdutil available, WiFi interface: {}", interface);
             }
@@ -300,7 +299,13 @@ impl AdHocNetwork {
         // Try legacy syntax variations
         let attempts: [&[&str]; 3] = [
             &["-i", &interface, "--ibss", &self.network_name, &channel_str],
-            &["--ibss", &self.network_name, &channel_str, "-c", &channel_str],
+            &[
+                "--ibss",
+                &self.network_name,
+                &channel_str,
+                "-c",
+                &channel_str,
+            ],
             &["-I", &interface, "sniff", &channel_str], // This won't create IBSS but tests airport
         ];
 
@@ -576,12 +581,13 @@ impl AdHocNetwork {
         let output = Command::new("nmcli")
             .args(["-t", "-f", "NAME,DEVICE", "connection", "show", "--active"])
             .output()
-            .map_err(|e| {
-                ConnectoError::Network(format!("Failed to get current network: {}", e))
-            })?;
+            .map_err(|e| ConnectoError::Network(format!("Failed to get current network: {}", e)))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let interface = self.interface.clone().unwrap_or_else(|| "wlan0".to_string());
+        let interface = self
+            .interface
+            .clone()
+            .unwrap_or_else(|| "wlan0".to_string());
 
         // Parse output format: "NetworkName:wlan0"
         for line in stdout.lines() {
@@ -820,9 +826,7 @@ impl AdHocNetwork {
                     let trimmed = line.trim();
                     if trimmed.starts_with("SSID:") {
                         let ssid = trimmed.replace("SSID:", "").trim().to_string();
-                        if ssid.starts_with(ADHOC_NETWORK_PREFIX)
-                            && !networks.contains(&ssid)
-                        {
+                        if ssid.starts_with(ADHOC_NETWORK_PREFIX) && !networks.contains(&ssid) {
                             networks.push(ssid);
                         }
                     }
@@ -838,9 +842,9 @@ impl AdHocNetwork {
     pub fn join_network(&mut self, network_name: &str) -> Result<()> {
         info!("Joining ad-hoc network: {}", network_name);
 
-        let interface = self.get_wifi_interface().ok_or_else(|| {
-            ConnectoError::Network("No WiFi interface found".to_string())
-        })?;
+        let interface = self
+            .get_wifi_interface()
+            .ok_or_else(|| ConnectoError::Network("No WiFi interface found".to_string()))?;
         self.interface = Some(interface.clone());
 
         // Save current network first
@@ -892,9 +896,7 @@ impl AdHocNetwork {
             let output = Command::new("nmcli")
                 .args(["connection", "up", network])
                 .output()
-                .map_err(|e| {
-                    ConnectoError::Network(format!("Failed to restore network: {}", e))
-                })?;
+                .map_err(|e| ConnectoError::Network(format!("Failed to restore network: {}", e)))?;
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -983,9 +985,7 @@ impl AdHocNetwork {
         let output = Command::new("netsh")
             .args(["wlan", "show", "interfaces"])
             .output()
-            .map_err(|e| {
-                ConnectoError::Network(format!("Failed to get current network: {}", e))
-            })?;
+            .map_err(|e| ConnectoError::Network(format!("Failed to get current network: {}", e)))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -1241,9 +1241,7 @@ impl AdHocNetwork {
             let output = Command::new("netsh")
                 .args(["wlan", "connect", &format!("name={}", network)])
                 .output()
-                .map_err(|e| {
-                    ConnectoError::Network(format!("Failed to restore network: {}", e))
-                })?;
+                .map_err(|e| ConnectoError::Network(format!("Failed to restore network: {}", e)))?;
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1393,9 +1391,13 @@ mod linux_tests {
 
     #[test]
     fn test_parse_nmcli_uuid() {
-        let output = "Connection 'Connecto-Test' (abc12345-1234-5678-90ab-cdef12345678) successfully added.";
+        let output =
+            "Connection 'Connecto-Test' (abc12345-1234-5678-90ab-cdef12345678) successfully added.";
         let uuid = AdHocNetwork::parse_nmcli_uuid(output);
-        assert_eq!(uuid, Some("abc12345-1234-5678-90ab-cdef12345678".to_string()));
+        assert_eq!(
+            uuid,
+            Some("abc12345-1234-5678-90ab-cdef12345678".to_string())
+        );
     }
 
     #[test]
