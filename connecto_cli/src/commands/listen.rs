@@ -153,11 +153,7 @@ pub async fn run_with_adhoc(
                 );
                 println!("  {} Run 'connecto scan' to find this device", "2.".cyan());
                 #[cfg(target_os = "windows")]
-                println!(
-                    "  {} Password: {}",
-                    "3.".cyan(),
-                    network.password().cyan()
-                );
+                println!("  {} Password: {}", "3.".cyan(), network.password().cyan());
                 println!();
                 _adhoc_network = Some(network);
             }
