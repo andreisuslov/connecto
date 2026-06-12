@@ -8,14 +8,23 @@
 //!
 //! The library is organized into the following modules:
 //!
-//! - [`discovery`]: mDNS-based device discovery using the `mdns-sd` crate
-//! - [`keys`]: SSH key generation, parsing, and management
-//! - [`protocol`]: The handshake protocol for secure key exchange
-//! - [`ssh_config`]: Parsing and editing of connecto-managed `~/.ssh/config` entries
+//! - [`discovery`]: mDNS-based device discovery (`mdns-sd`) plus direct
+//!   subnet scanning for networks where mDNS is blocked
+//! - [`keys`]: SSH key generation, parsing, fingerprints, and
+//!   `authorized_keys` management
+//! - [`protocol`]: The newline-delimited-JSON handshake protocol for key
+//!   exchange (pairing), including verification-code derivation
+//! - [`sync`]: Bidirectional key exchange between two devices, with
+//!   priority-based arbitration
+//! - [`ssh_config`]: The single parser/writer for connecto-managed
+//!   `~/.ssh/config` entries (owns the marker constant)
 //! - [`paths`]: Cross-platform home and SSH directory resolution
 //! - [`device_name`]: Sanitization of device names into SSH host aliases
 //! - [`user_config`]: Persistent user configuration (extra subnets, default key)
 //! - [`fsutil`]: Atomic file writes
+//! - [`fallback`]: Ad-hoc WiFi fallback with per-OS backends
+//! - [`error`]: The crate-wide [`ConnectoError`] / [`Result`] types
+//! - `bluetooth` (feature `bluetooth`): BLE discovery fallback
 //!
 //! # Example
 //!
@@ -23,15 +32,35 @@
 //! use connecto_core::{
 //!     discovery::{ServiceAdvertiser, ServiceBrowser, DEFAULT_PORT},
 //!     keys::{KeyAlgorithm, KeyManager, SshKeyPair},
-//!     protocol::{HandshakeClient, HandshakeServer},
+//!     protocol::{HandshakeClient, HandshakeServer, ServerEvent},
 //! };
+//! use tokio::sync::mpsc;
 //!
-//! // Server side: advertise and listen for pairing requests
+//! // Server side: advertise, bind, and SERVE pairing requests.
+//! // `listen` only binds the socket — nothing is accepted until `run`
+//! // (or `handle_one`) is awaited.
 //! async fn run_server() -> connecto_core::Result<()> {
 //!     let key_manager = KeyManager::new()?;
+//!     let mut advertiser = ServiceAdvertiser::new()?;
+//!     advertiser.advertise("My Device", DEFAULT_PORT)?;
+//!
 //!     let mut server = HandshakeServer::new(key_manager, "My Device");
 //!     let addr = server.listen(DEFAULT_PORT).await?;
 //!     println!("Listening on {}", addr);
+//!
+//!     let (event_tx, mut event_rx) = mpsc::channel(16);
+//!     let events = tokio::spawn(async move {
+//!         while let Some(event) = event_rx.recv().await {
+//!             if let ServerEvent::PairingComplete { device_name } = event {
+//!                 println!("Paired with {}", device_name);
+//!             }
+//!         }
+//!     });
+//!
+//!     // Serves pairing requests until every event receiver is dropped.
+//!     server.run(event_tx).await?;
+//!     let _ = events.await;
+//!     advertiser.stop()?;
 //!     Ok(())
 //! }
 //!
@@ -90,23 +119,3 @@ pub use bluetooth::{
     BluetoothAdvertiser, BluetoothBrowser, BluetoothDevice, BluetoothEvent, BLE_CHAR_DEVICE_INFO,
     BLE_SERVICE_UUID,
 };
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_re_exports() {
-        // Verify that re-exports work
-        let _ = DEFAULT_PORT;
-        let _ = SERVICE_TYPE;
-        let _ = PROTOCOL_VERSION;
-        let _ = KeyAlgorithm::default();
-        let _ = SYNC_SERVICE_TYPE;
-        let _ = DEFAULT_SYNC_TIMEOUT_SECS;
-        let _ = CONNECTO_MARKER;
-        let _ = AddOutcome::Added;
-        let _ = Config::default();
-        let _ = sanitize_device_name("Test Device");
-    }
-}

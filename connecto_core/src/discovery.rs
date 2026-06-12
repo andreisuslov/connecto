@@ -115,7 +115,11 @@ impl ServiceAdvertiser {
             port,
             properties,
         )
-        .map_err(|e| ConnectoError::Discovery(format!("Failed to create service info: {}", e)))?;
+        .map_err(|e| ConnectoError::Discovery(format!("Failed to create service info: {}", e)))?
+        // Without address auto-detection the service registers with no
+        // addresses and mdns-sd never answers PTR queries for it, so
+        // browsers cannot discover us at all.
+        .enable_addr_auto();
 
         let fullname = service_info.get_fullname().to_string();
 
@@ -594,30 +598,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_service_type_constant() {
-        assert_eq!(SERVICE_TYPE, "_connecto._tcp.local.");
-    }
-
-    #[test]
-    fn test_default_port() {
-        assert_eq!(DEFAULT_PORT, 8099);
-    }
-
-    #[test]
-    fn test_discovered_device_creation() {
-        let device = DiscoveredDevice {
-            name: "Test Device".to_string(),
-            hostname: "test.local.".to_string(),
-            addresses: vec!["192.168.1.100".parse().unwrap()],
-            port: 8099,
-            instance_name: "test-instance".to_string(),
-        };
-
-        assert_eq!(device.name, "Test Device");
-        assert_eq!(device.port, 8099);
-    }
-
-    #[test]
     fn test_primary_address_prefers_ipv4() {
         let device = DiscoveredDevice {
             name: "Test".to_string(),
@@ -680,20 +660,6 @@ mod tests {
     }
 
     #[test]
-    fn test_discovered_device_equality() {
-        let device1 = DiscoveredDevice {
-            name: "Test".to_string(),
-            hostname: "test.local.".to_string(),
-            addresses: vec!["192.168.1.100".parse().unwrap()],
-            port: 8099,
-            instance_name: "test".to_string(),
-        };
-
-        let device2 = device1.clone();
-        assert_eq!(device1, device2);
-    }
-
-    #[test]
     fn test_discovered_device_serialization() {
         let device = DiscoveredDevice {
             name: "Test Device".to_string(),
@@ -713,40 +679,6 @@ mod tests {
     fn test_get_hostname() {
         let hostname = get_hostname();
         assert!(!hostname.is_empty());
-    }
-
-    #[test]
-    fn test_discovery_event_variants() {
-        let device = DiscoveredDevice {
-            name: "Test".to_string(),
-            hostname: "test.local.".to_string(),
-            addresses: vec![],
-            port: 8099,
-            instance_name: "test".to_string(),
-        };
-
-        let event1 = DiscoveryEvent::DeviceFound(device);
-        let event2 = DiscoveryEvent::DeviceLost("test".to_string());
-        let event3 = DiscoveryEvent::SearchStarted;
-        let event4 = DiscoveryEvent::SearchStopped;
-
-        // Just verify these compile and can be pattern matched
-        match event1 {
-            DiscoveryEvent::DeviceFound(_) => {}
-            _ => panic!("Wrong variant"),
-        }
-        match event2 {
-            DiscoveryEvent::DeviceLost(_) => {}
-            _ => panic!("Wrong variant"),
-        }
-        match event3 {
-            DiscoveryEvent::SearchStarted => {}
-            _ => panic!("Wrong variant"),
-        }
-        match event4 {
-            DiscoveryEvent::SearchStopped => {}
-            _ => panic!("Wrong variant"),
-        }
     }
 
     #[test]

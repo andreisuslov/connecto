@@ -131,10 +131,10 @@ SSH agent offering too many keys.
 ```bash
 # Connect with specific key only
 ssh -o IdentitiesOnly=yes -i ~/.ssh/connecto_<host> <host>
-
-# Or update ~/.ssh/config (Connecto does this automatically):
-# IdentitiesOnly yes
 ```
+
+Or add `IdentitiesOnly yes` to the host's block in `~/.ssh/config` (Connecto
+does not add it automatically).
 
 ### Can't connect after IP change
 
@@ -230,8 +230,8 @@ sudo ausearch -m avc -ts recent
 # Find config location
 connecto config path
 
-# Reset config (backup first)
-mv ~/.config/connecto/config.json ~/.config/connecto/config.json.bak
+# Reset config (backup first; use the path printed above)
+mv "$(connecto config path)" "$(connecto config path).bak"
 ```
 
 ### SSH config conflicts
@@ -253,11 +253,14 @@ grep -n "Host <hostname>" ~/.ssh/config
 
 ### Verbose output
 
-Most commands support verbose mode (planned feature):
+All commands support a global verbose flag that enables debug logging:
 ```bash
-connecto scan -v
-connecto pair -v 0
+connecto -v scan
+connecto -v pair 0
 ```
+
+Connecto exits non-zero on failure, so you can also check `$?` (or
+`$LASTEXITCODE` on PowerShell) in scripts.
 
 ### Debug information
 
@@ -271,7 +274,7 @@ connecto config list
 connecto config path
 
 # SSH config (remove sensitive info)
-grep -A5 "# Added by Connecto" ~/.ssh/config
+grep -A4 "# Added by connecto" ~/.ssh/config
 
 # System info
 uname -a  # macOS/Linux

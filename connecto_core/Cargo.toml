@@ -19,10 +19,9 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 directories = { workspace = true }
-hostname = "0.4"
-local-ip-address = "0.6"
-futures = "0.3"
-flume = "0.11"
+hostname = { workspace = true }
+local-ip-address = { workspace = true }
+futures = { workspace = true }
 
 # Bluetooth (optional)
 btleplug = { workspace = true, optional = true }

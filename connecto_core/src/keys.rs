@@ -412,12 +412,6 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_key_algorithm_default() {
-        let algo = KeyAlgorithm::default();
-        assert_eq!(algo, KeyAlgorithm::Ed25519);
-    }
-
-    #[test]
     fn test_generate_ed25519_key() {
         let key_pair = SshKeyPair::generate(KeyAlgorithm::Ed25519, "test@connecto").unwrap();
 
@@ -425,6 +419,20 @@ mod tests {
         assert!(key_pair.public_key.starts_with("ssh-ed25519 "));
         assert!(key_pair.public_key.contains("test@connecto"));
         assert_eq!(key_pair.algorithm, KeyAlgorithm::Ed25519);
+    }
+
+    #[test]
+    fn test_generate_rsa4096_key() {
+        // Slower than Ed25519, but this is the only RSA-4096 coverage.
+        let key_pair = SshKeyPair::generate(KeyAlgorithm::Rsa4096, "rsa@test").unwrap();
+
+        assert!(key_pair.private_key.contains("OPENSSH PRIVATE KEY"));
+        assert!(key_pair.public_key.starts_with("ssh-rsa "));
+        assert!(key_pair.public_key.contains("rsa@test"));
+        assert_eq!(key_pair.algorithm, KeyAlgorithm::Rsa4096);
+        // The generated key must parse back as a valid RSA public key
+        let parsed = SshKeyPair::parse_public_key(&key_pair.public_key).unwrap();
+        assert_eq!(parsed.algorithm().as_str(), "ssh-rsa");
     }
 
     #[test]

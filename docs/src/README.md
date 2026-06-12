@@ -9,6 +9,8 @@ Connecto eliminates the hassle of manual SSH key setup. Instead of copying IP ad
 - **mDNS Discovery** - Automatically discover devices on your local network
 - **VPN Support** - Save subnets for cross-network discovery
 - **Zero-config Pairing** - Exchange SSH keys with a single command
+- **Verified Pairing** - `listen --verify` gates key installation behind a 6-digit code bound to the received key
+- **Bidirectional Sync** - `connecto sync` on both devices exchanges keys both ways
 - **Auto SSH Config** - `ssh hostname` just works after pairing
 - **Modern Cryptography** - Uses Ed25519 by default (RSA-4096 also supported)
 - **Cross-platform** - Works on Linux, macOS, and Windows

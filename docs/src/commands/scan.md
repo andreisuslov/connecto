@@ -10,17 +10,20 @@ connecto scan [OPTIONS]
 
 ## Description
 
-The `scan` command discovers devices on your network that are running `connecto listen`. It uses:
+The `scan` command discovers devices on your network that are running `connecto listen`. It tries discovery methods in order, falling back when one finds nothing:
 
-1. **mDNS discovery** - Finds devices advertising the `_connecto._tcp` service
-2. **Subnet scanning** - Scans saved subnets and optionally specified subnets
+1. **mDNS discovery** - finds devices advertising the `_connecto._tcp` service
+2. **Subnet scanning** - scans your local subnets, saved subnets, and any `--subnet` arguments
+3. **Ad-hoc network scan** - looks for Connecto ad-hoc WiFi networks (created with `connecto listen --adhoc`)
+4. **Bluetooth LE** - with `--bluetooth`, scans for BLE-advertised devices (requires a build with the `bluetooth` feature)
 
 ## Options
 
 | Option | Description |
 |--------|-------------|
-| `-s, --subnet <CIDR>` | Additional subnet to scan (can be repeated) |
 | `-t, --timeout <SECONDS>` | Scan timeout in seconds (default: 5) |
+| `-s, --subnet <CIDR>` | Additional subnet to scan (can be repeated) |
+| `--bluetooth` | Enable Bluetooth Low Energy scanning as a fallback |
 
 ## Examples
 
@@ -68,7 +71,9 @@ mDNS (multicast DNS) automatically finds devices on the same subnet. No configur
 
 ### Subnet scanning
 
-For VPN or cross-subnet scenarios, Connecto scans IP ranges directly.
+For VPN or cross-subnet scenarios, Connecto scans IP ranges directly. Each
+responding host is probed with a real protocol handshake, so only actual
+Connecto listeners show up — see [Protocol](../reference/protocol.md#subnet-scanning).
 
 **Saved subnets** are automatically included:
 ```bash
@@ -80,6 +85,30 @@ connecto scan  # Now includes 10.0.2.0/24
 ```bash
 connecto scan --subnet 10.0.2.0/24
 ```
+
+### Ad-hoc networks
+
+If nothing is found, Connecto looks for ad-hoc WiFi networks created by
+`connecto listen --adhoc`. When one is found, Connecto may briefly join it to
+probe for the listening host — your previous WiFi network is always restored
+before the results are printed, so pair by rejoining the ad-hoc network when
+you're ready.
+
+### Network isolation hint
+
+If you have a working network address but nothing answered, your router is
+likely isolating clients from each other (AP/client isolation). The scan
+output explains how to work around it with a direct WiFi network.
+
+## Device cache
+
+Scan results are cached so that `connecto pair <number>` can resolve device
+numbers. The cache lives in your per-user cache directory (e.g.
+`~/Library/Caches/com.connecto.connecto/devices.json` on macOS,
+`~/.cache/connecto/devices.json` on Linux) — not in a world-writable
+location like `/tmp`.
+
+Device numbers start at `0` and refer to the most recent scan.
 
 ## Scan performance
 

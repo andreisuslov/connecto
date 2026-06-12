@@ -25,6 +25,9 @@ The `update-ip` command changes the IP address for a paired host in `~/.ssh/conf
 
 The SSH keys remain valid - only the IP changes.
 
+`update-ip` only modifies entries marked `# Added by connecto`. Hand-written
+host blocks are never rewritten, even if they share the same alias.
+
 ## Example
 
 ```bash
@@ -33,17 +36,7 @@ connecto update-ip mydesktop 10.0.2.50
 
 Output:
 ```
-  CONNECTO UPDATE-IP
-
-→ Updating IP for: mydesktop
-→ Old IP: 192.168.1.55
-→ New IP: 10.0.2.50
-
-✓ Updated successfully!
-
-You can now connect with:
-
-  ssh mydesktop
+✓ Updated 'mydesktop' IP: 192.168.1.55 → 10.0.2.50
 ```
 
 ## Finding the New IP
@@ -73,6 +66,11 @@ The scan results show the current IP.
 - The SSH keys are not affected
 - You don't need to re-pair after updating the IP
 - Consider using static IPs or hostnames for frequently-changing devices
+
+## Exit status
+
+`update-ip` exits non-zero if the host is not found among the
+connecto-managed entries (or no SSH config exists).
 
 ## Related commands
 

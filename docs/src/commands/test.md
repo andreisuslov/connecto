@@ -18,9 +18,9 @@ connecto test <HOST>
 
 The `test` command verifies that SSH connectivity works to a paired host. It:
 
-1. Looks up the host in `~/.ssh/config`
-2. Attempts an SSH connection
-3. Runs a simple command (`echo "Connecto test successful"`)
+1. Runs `ssh` against the host alias (so it uses your `~/.ssh/config` entry)
+2. Uses `BatchMode` (no password prompts) and a 5-second connection timeout
+3. Executes a trivial echo command and checks the response
 4. Reports success or failure
 
 ## Example
@@ -33,12 +33,8 @@ connecto test mydesktop
 
 Output:
 ```
-  CONNECTO TEST
-
-→ Testing connection to: mydesktop
-
+→ Testing connection to mydesktop...
 ✓ Connection successful!
-  → SSH to mydesktop is working.
 ```
 
 ### Failed test
@@ -49,17 +45,19 @@ connecto test mydesktop
 
 Output:
 ```
-  CONNECTO TEST
-
-→ Testing connection to: mydesktop
-
-✗ Connection failed!
-  → Error: Connection refused
+→ Testing connection to mydesktop...
+✗ Connection failed.
 
 Troubleshooting:
   • Check if the host is online
-  • Verify the IP address: connecto hosts
+  • Verify the IP is correct: connecto hosts
   • Update IP if changed: connecto update-ip mydesktop <new-ip>
+```
+
+A failed test exits non-zero, so it can gate scripts:
+
+```bash
+connecto test mydesktop && rsync -a project/ mydesktop:project/
 ```
 
 ## Common issues

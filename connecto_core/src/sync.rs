@@ -594,68 +594,10 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_sync_service_type() {
-        assert_eq!(SYNC_SERVICE_TYPE, "_connecto-sync._tcp.local.");
-        // Must be different from regular pairing service
+    fn test_sync_service_type_differs_from_pairing_service() {
+        // The sync and pairing services must never share an mDNS service
+        // type, or each would discover the other's listeners.
         assert_ne!(SYNC_SERVICE_TYPE, crate::discovery::SERVICE_TYPE);
-    }
-
-    #[test]
-    fn test_sync_result() {
-        let result = SyncResult {
-            peer_name: "Device B".to_string(),
-            peer_user: "bob".to_string(),
-            peer_address: "192.168.1.100".parse().unwrap(),
-            peer_port: 8099,
-        };
-
-        assert_eq!(result.peer_name, "Device B");
-        assert_eq!(result.peer_user, "bob");
-        assert_eq!(result.peer_address.to_string(), "192.168.1.100");
-        assert_eq!(result.peer_port, 8099);
-    }
-
-    #[test]
-    fn test_sync_handler_creation() {
-        let temp_dir = TempDir::new().unwrap();
-        let ssh_dir = temp_dir.path().join(".ssh");
-        let key_manager = KeyManager::with_dir(ssh_dir);
-        let key_pair = SshKeyPair::generate(KeyAlgorithm::Ed25519, "test@sync").unwrap();
-
-        let handler = SyncHandler::new(key_manager, "Test Device", key_pair);
-        assert_eq!(handler.device_name, "Test Device");
-    }
-
-    #[test]
-    fn test_sync_event_variants() {
-        let addr: SocketAddr = "127.0.0.1:8099".parse().unwrap();
-
-        let events = [
-            SyncEvent::Started { address: addr },
-            SyncEvent::Searching,
-            SyncEvent::PeerFound {
-                device_name: "Peer".to_string(),
-                address: addr,
-            },
-            SyncEvent::Connected {
-                device_name: "Peer".to_string(),
-            },
-            SyncEvent::KeyReceived {
-                device_name: "Peer".to_string(),
-                key_comment: "test@peer".to_string(),
-            },
-            SyncEvent::KeyAccepted,
-            SyncEvent::Completed {
-                peer_name: "Peer".to_string(),
-                peer_user: "user".to_string(),
-            },
-            SyncEvent::Failed {
-                message: "Error".to_string(),
-            },
-        ];
-
-        // Just verify all variants can be created
-        assert_eq!(events.len(), 8);
     }
 
     #[tokio::test]

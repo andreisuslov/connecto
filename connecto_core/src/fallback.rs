@@ -800,11 +800,6 @@ mod tests {
     }
 
     #[test]
-    fn test_adhoc_network_prefix() {
-        assert_eq!(ADHOC_NETWORK_PREFIX, "Connecto-");
-    }
-
-    #[test]
     fn test_network_name_sanitization() {
         let adhoc = AdHocNetwork::new("My Device!@#$%");
         assert!(adhoc.network_name().starts_with(ADHOC_NETWORK_PREFIX));

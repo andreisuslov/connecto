@@ -6,9 +6,9 @@ use connecto_core::{
     keys::{KeyAlgorithm, KeyManager, SshKeyPair},
     protocol::{
         verification_code_for_key, ApprovalCallback, HandshakeClient, HandshakeServer, Message,
-        PairingRequest, ServerEvent, PROTOCOL_VERSION,
+        PairingRequest, ServerEvent,
     },
-    DEFAULT_PORT,
+    ServiceAdvertiser, ServiceBrowser, SubnetScanner,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -18,143 +18,6 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-
-/// Test that we can generate keys and parse them back
-#[test]
-fn test_key_roundtrip() {
-    // Generate Ed25519 key
-    let key_pair = SshKeyPair::generate(KeyAlgorithm::Ed25519, "test@connecto").unwrap();
-
-    // Parse the public key
-    let parsed = SshKeyPair::parse_public_key(&key_pair.public_key).unwrap();
-
-    // Verify the key type
-    assert!(key_pair.public_key.starts_with("ssh-ed25519"));
-    assert_eq!(parsed.algorithm().as_str(), "ssh-ed25519");
-}
-
-/// Test that keys can be saved and loaded from disk
-#[test]
-fn test_key_persistence() {
-    let temp_dir = TempDir::new().unwrap();
-    let ssh_dir = temp_dir.path().join(".ssh");
-
-    let manager = KeyManager::with_dir(ssh_dir.clone());
-    let key_pair = SshKeyPair::generate(KeyAlgorithm::Ed25519, "test@connecto").unwrap();
-
-    // Save the key
-    let (private_path, public_path) = manager.save_key_pair(&key_pair, "test_key").unwrap();
-
-    // Verify files exist
-    assert!(private_path.exists());
-    assert!(public_path.exists());
-
-    // Read and verify content
-    let saved_private = std::fs::read_to_string(&private_path).unwrap();
-    let saved_public = std::fs::read_to_string(&public_path).unwrap();
-
-    assert_eq!(saved_private, key_pair.private_key);
-    assert_eq!(saved_public, key_pair.public_key);
-}
-
-/// Test authorized_keys management
-#[test]
-fn test_authorized_keys_management() {
-    let temp_dir = TempDir::new().unwrap();
-    let ssh_dir = temp_dir.path().join(".ssh");
-
-    let manager = KeyManager::with_dir(ssh_dir);
-
-    // Generate some keys
-    let key1 = SshKeyPair::generate(KeyAlgorithm::Ed25519, "user1@host").unwrap();
-    let key2 = SshKeyPair::generate(KeyAlgorithm::Ed25519, "user2@host").unwrap();
-    let key3 = SshKeyPair::generate(KeyAlgorithm::Ed25519, "user3@host").unwrap();
-
-    // Add keys
-    manager.add_authorized_key(&key1.public_key).unwrap();
-    manager.add_authorized_key(&key2.public_key).unwrap();
-    manager.add_authorized_key(&key3.public_key).unwrap();
-
-    // Verify all keys are present
-    let keys = manager.list_authorized_keys().unwrap();
-    assert_eq!(keys.len(), 3);
-
-    // Remove one key
-    let removed = manager.remove_authorized_key(&key2.public_key).unwrap();
-    assert!(removed);
-
-    // Verify key was removed
-    let keys = manager.list_authorized_keys().unwrap();
-    assert_eq!(keys.len(), 2);
-    assert!(!keys.iter().any(|k| k.contains("user2@host")));
-}
-
-/// Test the handshake protocol message serialization
-#[test]
-fn test_protocol_messages() {
-    // Test Hello message
-    let hello = Message::Hello {
-        version: PROTOCOL_VERSION,
-        device_name: "Test Device".to_string(),
-    };
-
-    let json = hello.to_json().unwrap();
-    let parsed = Message::from_json(&json).unwrap();
-
-    match parsed {
-        Message::Hello {
-            version,
-            device_name,
-        } => {
-            assert_eq!(version, PROTOCOL_VERSION);
-            assert_eq!(device_name, "Test Device");
-        }
-        _ => panic!("Expected Hello message"),
-    }
-
-    // Test HelloAck message
-    let hello_ack = Message::HelloAck {
-        version: PROTOCOL_VERSION,
-        device_name: "Server".to_string(),
-        verification_code: Some("1234".to_string()),
-    };
-
-    let json = hello_ack.to_json().unwrap();
-    let parsed = Message::from_json(&json).unwrap();
-
-    match parsed {
-        Message::HelloAck {
-            version,
-            device_name,
-            verification_code,
-        } => {
-            assert_eq!(version, PROTOCOL_VERSION);
-            assert_eq!(device_name, "Server");
-            assert_eq!(verification_code, Some("1234".to_string()));
-        }
-        _ => panic!("Expected HelloAck message"),
-    }
-
-    // Test KeyExchange message
-    let key_exchange = Message::KeyExchange {
-        public_key: "ssh-ed25519 AAAA... test@connecto".to_string(),
-        comment: "test@connecto".to_string(),
-    };
-
-    let json = key_exchange.to_json().unwrap();
-    let parsed = Message::from_json(&json).unwrap();
-
-    match parsed {
-        Message::KeyExchange {
-            public_key,
-            comment,
-        } => {
-            assert!(public_key.starts_with("ssh-ed25519"));
-            assert_eq!(comment, "test@connecto");
-        }
-        _ => panic!("Expected KeyExchange message"),
-    }
-}
 
 /// Test full pairing workflow
 #[tokio::test]
@@ -416,80 +279,76 @@ async fn test_approval_callback_sees_matching_verification_code() {
     assert!(keys[0].contains("approved@test"));
 }
 
-/// Test error message handling
-#[test]
-fn test_error_message() {
-    let error_msg = Message::Error {
-        code: 42,
-        message: "Something went wrong".to_string(),
-    };
-
-    let json = error_msg.to_json().unwrap();
-    let parsed = Message::from_json(&json).unwrap();
-
-    match parsed {
-        Message::Error { code, message } => {
-            assert_eq!(code, 42);
-            assert_eq!(message, "Something went wrong");
-        }
-        _ => panic!("Expected Error message"),
-    }
-}
-
-/// Test multiple key algorithms
-#[test]
-fn test_key_algorithms() {
-    // Ed25519
-    let ed_key = SshKeyPair::generate(KeyAlgorithm::Ed25519, "ed25519@test").unwrap();
-    assert!(ed_key.public_key.starts_with("ssh-ed25519"));
-
-    // RSA (this is slower but should work)
-    let rsa_key = SshKeyPair::generate(KeyAlgorithm::Rsa4096, "rsa@test").unwrap();
-    assert!(rsa_key.public_key.starts_with("ssh-rsa"));
-}
-
-/// Test key manager directory creation
-#[test]
-fn test_key_manager_creates_directory() {
+/// The SubnetScanner's TCP probe must discover a real HandshakeServer
+///
+/// Exercises the probe + identify_device path (TCP connect, Hello/HelloAck
+/// exchange) against a live server on loopback - no mDNS required, so this
+/// runs cross-platform and on CI.
+#[tokio::test]
+async fn test_subnet_scanner_discovers_loopback_listener() {
     let temp_dir = TempDir::new().unwrap();
-    let ssh_dir = temp_dir.path().join("deeply/nested/.ssh");
+    let key_manager = KeyManager::with_dir(temp_dir.path().join(".ssh"));
 
-    // Directory shouldn't exist yet
-    assert!(!ssh_dir.exists());
+    let mut server = HandshakeServer::new(key_manager, "Scan Target");
+    let port = server.listen(0).await.unwrap().port();
 
-    let manager = KeyManager::with_dir(ssh_dir.clone());
-    manager.ensure_ssh_dir().unwrap();
+    // run() serves probes concurrently; it shuts down when the event channel
+    // closes, so keep the receiver alive for the duration of the scan.
+    let (event_tx, event_rx) = mpsc::channel(32);
+    let server_task = tokio::spawn(async move { server.run(event_tx).await });
 
-    // Now it should exist
-    assert!(ssh_dir.exists());
+    // 127.0.0.0/30 expands to exactly 127.0.0.1 (our listener) and 127.0.0.2
+    let scanner = SubnetScanner::new(port, Duration::from_secs(2));
+    let devices = scanner.scan_subnets(&["127.0.0.0/30".to_string()]).await;
+
+    let loopback: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+    let found = devices
+        .iter()
+        .find(|d| d.addresses.contains(&loopback))
+        .unwrap_or_else(|| panic!("loopback listener not discovered, got: {:?}", devices));
+    assert_eq!(found.name, "Scan Target");
+    assert_eq!(found.port, port);
+
+    drop(event_rx);
+    server_task.abort();
 }
 
-/// Test discovery module data structures
-#[test]
-fn test_discovered_device() {
-    use connecto_core::DiscoveredDevice;
+/// mDNS advertise + browse round trip over the real network stack
+///
+/// Ignored by default: requires multicast-capable network; run manually with
+/// --ignored. Multicast support on CI runners is unreliable, so opt-in is
+/// deliberate.
+///
+/// KNOWN FAILURE (2026-06-12): this currently fails even on a working
+/// network because ServiceAdvertiser::advertise registers the ServiceInfo
+/// with no IP addresses and never calls enable_addr_auto(); mdns-sd 0.11
+/// refuses to answer PTR queries for an address-less service
+/// (dns_parser.rs add_answer_with_additionals bails when intf_addrs is
+/// empty), so browsers never even see ServiceFound. This test is the
+/// regression check for that production fix.
+#[tokio::test]
+#[ignore = "requires multicast-capable network; run manually with --ignored"]
+async fn test_mdns_advertise_browse_roundtrip() {
+    // Unique per-run instance name so a stale or concurrent advertisement on
+    // the LAN cannot satisfy the assertion.
+    let unique_name = format!("itest-mdns-{}", std::process::id());
+    let port = 18099;
 
-    let device = DiscoveredDevice {
-        name: "Test Device".to_string(),
-        hostname: "test.local.".to_string(),
-        addresses: vec![
-            "192.168.1.100".parse().unwrap(),
-            "10.0.0.50".parse().unwrap(),
-        ],
-        port: DEFAULT_PORT,
-        instance_name: "test-instance".to_string(),
-    };
+    let mut advertiser = ServiceAdvertiser::new().unwrap();
+    advertiser.advertise(&unique_name, port).unwrap();
 
-    // Test primary address selection (should prefer first IPv4)
-    let primary = device.primary_address().unwrap();
-    assert!(primary.is_ipv4());
+    let browser = ServiceBrowser::new().unwrap();
+    let devices = browser
+        .scan_for_duration(Duration::from_secs(5))
+        .await
+        .unwrap();
 
-    // Test connection string
-    let conn_str = device.connection_string().unwrap();
-    assert!(conn_str.contains(":8099"));
+    let found = devices
+        .iter()
+        .find(|d| d.instance_name.contains(&unique_name))
+        .unwrap_or_else(|| panic!("advertised instance not browsed, got: {:?}", devices));
+    assert_eq!(found.port, port);
+    assert!(!found.addresses.is_empty());
 
-    // Test serialization
-    let json = serde_json::to_string(&device).unwrap();
-    let deserialized: DiscoveredDevice = serde_json::from_str(&json).unwrap();
-    assert_eq!(device, deserialized);
+    advertiser.stop().unwrap();
 }

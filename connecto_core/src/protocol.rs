@@ -708,12 +708,6 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_protocol_version() {
-        assert_eq!(PROTOCOL_VERSION, 1);
-        assert_eq!(MIN_SUPPORTED_VERSION, 1);
-    }
-
-    #[test]
     fn test_negotiate_version_accepts_supported_range() {
         for version in MIN_SUPPORTED_VERSION..=PROTOCOL_VERSION {
             assert_eq!(negotiate_version(version), Ok(version));
@@ -859,25 +853,6 @@ mod tests {
             }
             _ => panic!("Wrong message type"),
         }
-    }
-
-    #[test]
-    fn test_handshake_client_creation() {
-        let client = HandshakeClient::new("Test Client");
-        assert_eq!(client.device_name, "Test Client");
-    }
-
-    #[test]
-    fn test_pairing_result() {
-        let result = PairingResult {
-            server_name: "Server".to_string(),
-            ssh_user: "user".to_string(),
-            verification_code: "123456".to_string(),
-        };
-
-        assert_eq!(result.server_name, "Server");
-        assert_eq!(result.ssh_user, "user");
-        assert_eq!(result.verification_code, "123456");
     }
 
     #[tokio::test]

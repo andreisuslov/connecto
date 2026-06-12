@@ -26,10 +26,11 @@ connecto pair <TARGET>
 
 The `pair` command establishes SSH key-based authentication with a remote device:
 
-1. Generates a new Ed25519 SSH key pair
+1. Generates a new Ed25519 SSH key pair (or uses an existing key — see below)
 2. Sends the public key to the target device
-3. Saves the private key to `~/.ssh/connecto_<hostname>`
-4. Updates `~/.ssh/config` for easy `ssh hostname` access
+3. Displays a 6-digit verification code to compare with the listening device
+4. Saves the private key to `~/.ssh/connecto_<device>`
+5. Updates `~/.ssh/config` for easy `ssh hostname` access
 
 ## Examples
 
@@ -50,6 +51,8 @@ Output:
 
 ✓ Pairing successful!
 
+→ Verification code: 627765 — confirm it matches on mydesktop
+
 Key saved:
   • Private: /home/user/.ssh/connecto_mydesktop
   • Public:  /home/user/.ssh/connecto_mydesktop.pub
@@ -60,6 +63,12 @@ You can now connect with:
 
   ssh mydesktop
 ```
+
+The verification code is derived from the key you sent; the listener derives
+the same code from the key it received. If the listener runs with
+`--verify`, its operator compares the codes before approving — matching codes
+rule out a man-in-the-middle that swapped the key
+(see [Security](../reference/security.md)).
 
 ### Pair by IP Address
 
@@ -79,33 +88,37 @@ connecto pair 192.168.1.55
 
 ### SSH key pair
 
-- **Private key**: `~/.ssh/connecto_<hostname>`
-- **Public key**: `~/.ssh/connecto_<hostname>.pub`
+- **Private key**: `~/.ssh/connecto_<device>`
+- **Public key**: `~/.ssh/connecto_<device>.pub`
 
-Keys use Ed25519 by default (modern, secure, fast).
+`<device>` is the listener's device name sanitized into a lowercase alias
+(e.g. `My Desktop` → `my-desktop`). Keys use Ed25519 by default (modern,
+secure, fast).
 
 ### SSH config entry
 
 An entry is added to `~/.ssh/config`:
 
 ```
-# Added by Connecto
+# Added by connecto
 Host mydesktop
     HostName 192.168.1.55
     User john
-    IdentityFile ~/.ssh/connecto_mydesktop
-    IdentitiesOnly yes
+    IdentityFile /home/user/.ssh/connecto_mydesktop
 ```
 
-This allows simple `ssh mydesktop` without specifying user, IP, or key.
+This allows simple `ssh mydesktop` without specifying user, IP, or key. The
+`# Added by connecto` marker identifies the entry as connecto-managed:
+commands like `hosts`, `unpair`, and `update-ip` only ever touch marked
+blocks, never your hand-written config.
 
 ## Re-pairing
 
-If you pair with a device that already has an entry:
+If you pair with a device that already has a connecto-managed entry:
 
-1. The old key files are overwritten
-2. The SSH config entry is updated
-3. A new key exchange occurs
+1. The SSH config block is replaced in place
+2. A new key exchange occurs; a freshly generated key overwrites the old
+   key files
 
 This is useful when:
 - The remote machine was reinstalled
@@ -122,6 +135,8 @@ Instead of generating a new key for each pairing, you can use an existing SSH ke
 connecto pair 0 --key ~/.ssh/id_ed25519
 ```
 
+Both the private key and its `.pub` file must exist.
+
 ### Set default key
 
 Set a default key for all future pairings:
@@ -130,7 +145,7 @@ Set a default key for all future pairings:
 connecto config set-default-key ~/.ssh/id_ed25519
 ```
 
-Now all `connecto pair` commands will use this key automatically.
+Now `connecto pair` and `connecto sync` will use this key automatically.
 
 ### Clear default key
 
@@ -159,4 +174,13 @@ Or verify the pairing:
 
 ```bash
 connecto test mydesktop
+```
+
+## Exit status
+
+`pair` exits non-zero when pairing fails (connection refused, rejected by the
+listener, invalid key, ...), so it is safe to chain in scripts:
+
+```bash
+connecto pair 0 && ssh mydesktop
 ```
