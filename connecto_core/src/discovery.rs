@@ -19,6 +19,8 @@ use tracing::{debug, info, warn};
 pub const SERVICE_TYPE: &str = "_connecto._tcp.local.";
 /// Default port for the Connecto handshake service
 pub const DEFAULT_PORT: u16 = 8099;
+/// TXT property key under which sync advertisements publish their per-run priority
+pub const TXT_PRIORITY_KEY: &str = "priority";
 
 /// Represents a discovered Connecto device
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -87,6 +89,20 @@ impl ServiceAdvertiser {
 
     /// Start advertising this device
     pub fn advertise(&mut self, device_name: &str, port: u16) -> Result<()> {
+        self.advertise_with_properties(device_name, port, &[])
+    }
+
+    /// Start advertising this device with additional TXT properties
+    ///
+    /// Used by sync to publish its per-run priority under
+    /// [`TXT_PRIORITY_KEY`] so browsers can distinguish this run's own
+    /// advertisement from another device that happens to share the hostname.
+    pub fn advertise_with_properties(
+        &mut self,
+        device_name: &str,
+        port: u16,
+        properties: &[(&str, &str)],
+    ) -> Result<()> {
         let hostname = get_hostname();
         let service_hostname = format!("{}.local.", hostname);
         let instance_name = format!("{} ({})", device_name, hostname);
@@ -97,7 +113,7 @@ impl ServiceAdvertiser {
             &service_hostname,
             "",
             port,
-            None,
+            properties,
         )
         .map_err(|e| ConnectoError::Discovery(format!("Failed to create service info: {}", e)))?;
 
@@ -138,8 +154,25 @@ impl Drop for ServiceAdvertiser {
 pub struct ServiceBrowser {
     daemon: ServiceDaemon,
     service_type: String,
-    skip_substring: Option<String>,
+    /// `(own device name, own TXT priority)`; see [`Self::skip_own_instance`]
+    skip_own: Option<(String, String)>,
     devices: Arc<Mutex<HashMap<String, DiscoveredDevice>>>,
+}
+
+/// True when a resolved mDNS instance is this process's own advertisement
+///
+/// An instance counts as "ourselves" only when BOTH its fullname contains our
+/// device name AND its TXT [`TXT_PRIORITY_KEY`] property equals the random
+/// per-run priority we advertised. Matching on the name alone (the previous
+/// behavior) also filtered out distinct devices that share a hostname, which
+/// made identical-hostname machines invisible to each other during sync.
+fn is_own_instance(
+    fullname: &str,
+    txt_priority: Option<&str>,
+    own_name: &str,
+    own_priority: &str,
+) -> bool {
+    fullname.contains(own_name) && txt_priority == Some(own_priority)
 }
 
 impl ServiceBrowser {
@@ -159,17 +192,21 @@ impl ServiceBrowser {
         Ok(Self {
             daemon,
             service_type: service_type.to_string(),
-            skip_substring: None,
+            skip_own: None,
             devices: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
-    /// Skip resolved instances whose mDNS fullname contains `name`
+    /// Skip this run's own advertisement while browsing
     ///
-    /// Used by sync to ignore this device's own advertisement while browsing
-    /// for peers.
-    pub fn skip_instances_containing(mut self, name: &str) -> Self {
-        self.skip_substring = Some(name.to_string());
+    /// `priority_txt` is the value advertised under [`TXT_PRIORITY_KEY`]
+    /// (sync's random per-run priority). A resolved instance is skipped only
+    /// when its fullname contains `name` AND its TXT priority equals
+    /// `priority_txt`, i.e. it is genuinely this run's own advertisement.
+    /// Two distinct devices with identical hostnames advertise different
+    /// priorities and therefore still find each other.
+    pub fn skip_own_instance(mut self, name: &str, priority_txt: &str) -> Self {
+        self.skip_own = Some((name.to_string(), priority_txt.to_string()));
         self
     }
 
@@ -182,7 +219,7 @@ impl ServiceBrowser {
 
         let (tx, rx) = mpsc::channel(100);
         let devices = Arc::clone(&self.devices);
-        let skip_substring = self.skip_substring.clone();
+        let skip_own = self.skip_own.clone();
 
         // Bridge thread: forwards mDNS daemon events to the async channel.
         // It exits when the daemon channel disconnects (daemon shut down on
@@ -193,8 +230,9 @@ impl ServiceBrowser {
                     ServiceEvent::ServiceResolved(info) => {
                         let fullname = info.get_fullname().to_string();
 
-                        if let Some(ref skip) = skip_substring {
-                            if fullname.contains(skip) {
+                        if let Some((own_name, own_priority)) = &skip_own {
+                            let txt_priority = info.get_property_val_str(TXT_PRIORITY_KEY);
+                            if is_own_instance(&fullname, txt_priority, own_name, own_priority) {
                                 debug!("Skipping our own service: {}", fullname);
                                 continue;
                             }
@@ -765,6 +803,29 @@ mod tests {
         // /16 is the limit (65534 hosts) - should work
         let result = SubnetScanner::parse_cidr("10.0.0.0/16");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_is_own_instance_matches_only_name_and_priority() {
+        let fullname = "MyHost (myhost)._connecto-sync._tcp.local.";
+
+        // Same name + same priority = genuinely ourselves
+        assert!(is_own_instance(fullname, Some("12345"), "MyHost", "12345"));
+
+        // Identical hostname but a DIFFERENT per-run priority is another
+        // device and must NOT be filtered (the old substring filter hid it)
+        assert!(!is_own_instance(fullname, Some("99999"), "MyHost", "12345"));
+
+        // Missing TXT priority (e.g. older peer) is never treated as ourselves
+        assert!(!is_own_instance(fullname, None, "MyHost", "12345"));
+
+        // Same priority value but a different name is not ourselves either
+        assert!(!is_own_instance(
+            "OtherHost (otherhost)._connecto-sync._tcp.local.",
+            Some("12345"),
+            "MyHost",
+            "12345"
+        ));
     }
 
     // Integration test - requires network access

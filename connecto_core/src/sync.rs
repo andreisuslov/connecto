@@ -2,19 +2,23 @@
 //!
 //! Enables two devices to simultaneously exchange SSH keys so both can SSH to each other.
 
-use crate::discovery::{DiscoveryEvent, ServiceAdvertiser, ServiceBrowser};
+use crate::discovery::{DiscoveryEvent, ServiceAdvertiser, ServiceBrowser, TXT_PRIORITY_KEY};
 use crate::error::{ConnectoError, Result};
 use crate::keys::{KeyManager, SshKeyPair};
 use crate::protocol::{
-    read_message, write_message, Message, HANDSHAKE_READ_TIMEOUT, PROTOCOL_VERSION,
+    negotiate_version, read_message, write_message, Message, HANDSHAKE_READ_TIMEOUT,
+    PROTOCOL_VERSION,
 };
 use rand::Rng;
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::BufReader;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
+use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 /// Service type for sync discovery (different from regular pairing)
@@ -62,7 +66,34 @@ pub struct SyncResult {
     pub peer_port: u16,
 }
 
+/// Decide whether an incoming initiator wins the sync arbitration
+///
+/// The initiator wins iff its `(priority, device name)` pair is strictly
+/// greater than ours; the device name is the deterministic secondary
+/// tie-break for equal priorities. The responder accepts the sync only when
+/// the initiator wins; otherwise it replies `accept_sync: false` and keeps
+/// listening, because OUR initiator role outranks theirs and will be (or has
+/// been) accepted by their responder. Exactly one direction wins, so mutual
+/// simultaneous initiation converges instead of deadlocking.
+fn initiator_wins(peer_priority: u64, peer_name: &str, our_priority: u64, our_name: &str) -> bool {
+    (peer_priority, peer_name) > (our_priority, our_name)
+}
+
+/// Bound a sync attempt by the run's overall deadline
+async fn with_deadline<F>(deadline: Instant, attempt: F) -> Result<SyncResult>
+where
+    F: Future<Output = Result<SyncResult>>,
+{
+    match tokio::time::timeout_at(deadline, attempt).await {
+        Ok(result) => result,
+        Err(_) => Err(ConnectoError::Timeout(
+            "Sync attempt exceeded the overall deadline".to_string(),
+        )),
+    }
+}
+
 /// Handler for bidirectional sync operations
+#[derive(Clone)]
 pub struct SyncHandler {
     key_manager: Arc<KeyManager>,
     device_name: String,
@@ -83,10 +114,13 @@ impl SyncHandler {
     ///
     /// This will:
     /// 1. Start listening on the specified port
-    /// 2. Advertise via mDNS
+    /// 2. Advertise via mDNS, publishing our random per-run priority as a
+    ///    TXT property (used by browsers to recognize their own advertisement)
     /// 3. Scan for other sync peers
-    /// 4. When a peer is found, determine who initiates based on priority
-    /// 5. Exchange keys bidirectionally
+    /// 4. Attempt key exchange both ways; the responder-side arbitration
+    ///    (see [`initiator_wins`]) ensures exactly one direction completes
+    /// 5. Exchange keys bidirectionally; each side installs the peer's key
+    ///    only after the protocol confirms the exchange
     pub async fn run(
         &self,
         port: u16,
@@ -106,70 +140,102 @@ impl SyncHandler {
             })
             .await;
 
-        // Start mDNS advertising on the sync service type
-        let mut advertiser = ServiceAdvertiser::new_for_service(SYNC_SERVICE_TYPE)?;
-        advertiser.advertise(&self.device_name, local_addr.port())?;
-
-        // Start browsing for peers, skipping our own advertisement
-        let _ = event_tx.send(SyncEvent::Searching).await;
-        let browser = ServiceBrowser::new_for_service(SYNC_SERVICE_TYPE)?
-            .skip_instances_containing(&self.device_name);
-        let mut peer_rx = browser.browse()?;
-        let mut browse_active = true;
-
-        // Generate our initiator priority
+        // Generate our initiator priority for this run
         let our_priority: u64 = rand::thread_rng().gen();
         debug!("Our initiator priority: {}", our_priority);
+        let priority_txt = our_priority.to_string();
 
+        // Start mDNS advertising on the sync service type, publishing the
+        // per-run priority so peers can tell us apart from a same-named device
+        let mut advertiser = ServiceAdvertiser::new_for_service(SYNC_SERVICE_TYPE)?;
+        advertiser.advertise_with_properties(
+            &self.device_name,
+            local_addr.port(),
+            &[(TXT_PRIORITY_KEY, priority_txt.as_str())],
+        )?;
+
+        // Start browsing for peers, skipping only our own advertisement
+        // (same name AND same TXT priority)
+        let _ = event_tx.send(SyncEvent::Searching).await;
+        let browser = ServiceBrowser::new_for_service(SYNC_SERVICE_TYPE)?
+            .skip_own_instance(&self.device_name, &priority_txt);
+        let peer_rx = browser.browse()?;
+
+        let result = self
+            .run_loop(listener, peer_rx, our_priority, timeout_secs, event_tx)
+            .await;
+
+        // Cleanup. Dropping the browser (and advertiser) shuts their mDNS
+        // daemons down, which also terminates the browse bridge thread.
+        advertiser.stop()?;
+        drop(browser);
+
+        result
+    }
+
+    /// Core sync loop over an already-bound listener and a peer discovery
+    /// channel (separated from [`Self::run`] so it can be driven without real
+    /// mDNS in tests)
+    ///
+    /// Initiator and responder attempts are spawned as concurrent tasks
+    /// rather than awaited inline, so an incoming connection is still served
+    /// while our own outgoing attempt is in flight; this is what lets mutual
+    /// simultaneous initiation converge. Every attempt is additionally
+    /// bounded by the run's overall deadline.
+    async fn run_loop(
+        &self,
+        listener: TcpListener,
+        mut peer_rx: mpsc::Receiver<DiscoveryEvent>,
+        our_priority: u64,
+        timeout_secs: u64,
+        event_tx: mpsc::Sender<SyncEvent>,
+    ) -> Result<SyncResult> {
         // Prepare our SSH user
         let ssh_user = std::env::var("USER")
             .or_else(|_| std::env::var("USERNAME"))
             .unwrap_or_else(|_| "unknown".to_string());
 
-        // Main event loop - either accept incoming connection or connect to found peer
-        let timeout = tokio::time::sleep(Duration::from_secs(timeout_secs));
-        tokio::pin!(timeout);
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        let mut browse_active = true;
+        let mut attempts: JoinSet<Result<SyncResult>> = JoinSet::new();
 
-        let result = loop {
+        loop {
             tokio::select! {
-                // Timeout
-                _ = &mut timeout => {
+                // Overall timeout
+                _ = tokio::time::sleep_until(deadline) => {
                     let _ = event_tx.send(SyncEvent::Failed {
                         message: "Timeout waiting for sync peer".to_string(),
                     }).await;
                     break Err(ConnectoError::Timeout("No sync peer found".to_string()));
                 }
 
-                // Incoming connection
+                // Incoming connection: serve it as responder in a background
+                // task so we keep accepting (and initiating) meanwhile
                 accept_result = listener.accept() => {
                     match accept_result {
                         Ok((stream, peer_addr)) => {
                             info!("Incoming sync connection from {}", peer_addr);
-
-                            // Handle as responder (we respond to their SyncHello)
-                            match self.handle_as_responder(
-                                stream,
-                                peer_addr,
-                                our_priority,
-                                &ssh_user,
-                                event_tx.clone(),
-                            ).await {
-                                Ok(result) => break Ok(result),
-                                Err(e) => {
-                                    warn!("Responder sync failed: {}", e);
-                                    // Continue waiting for other connections
-                                    continue;
-                                }
-                            }
+                            let this = self.clone();
+                            let ssh_user = ssh_user.clone();
+                            let event_tx = event_tx.clone();
+                            attempts.spawn(async move {
+                                with_deadline(deadline, this.handle_as_responder(
+                                    stream,
+                                    peer_addr,
+                                    our_priority,
+                                    &ssh_user,
+                                    event_tx,
+                                )).await
+                            });
                         }
                         Err(e) => {
                             warn!("Accept failed: {}", e);
-                            continue;
                         }
                     }
                 }
 
-                // Found a peer via mDNS
+                // Found a peer via mDNS: try to connect as initiator in a
+                // background task
                 event = peer_rx.recv(), if browse_active => {
                     match event {
                         Some(DiscoveryEvent::DeviceFound(peer)) => {
@@ -182,20 +248,17 @@ impl SyncHandler {
                             }).await;
 
                             if let Some(conn_str) = peer.connection_string() {
-                                // Try to connect as initiator
-                                match self.handle_as_initiator(
-                                    &conn_str,
-                                    our_priority,
-                                    &ssh_user,
-                                    event_tx.clone(),
-                                ).await {
-                                    Ok(result) => break Ok(result),
-                                    Err(e) => {
-                                        warn!("Initiator sync failed: {}", e);
-                                        // Continue waiting - maybe they'll connect to us
-                                        continue;
-                                    }
-                                }
+                                let this = self.clone();
+                                let ssh_user = ssh_user.clone();
+                                let event_tx = event_tx.clone();
+                                attempts.spawn(async move {
+                                    with_deadline(deadline, this.handle_as_initiator(
+                                        &conn_str,
+                                        our_priority,
+                                        &ssh_user,
+                                        event_tx,
+                                    )).await
+                                });
                             }
                         }
                         Some(_) => {
@@ -209,15 +272,23 @@ impl SyncHandler {
                         }
                     }
                 }
+
+                // A sync attempt finished: first success wins, failures
+                // (including arbitration rejections) just keep us waiting
+                Some(joined) = attempts.join_next(), if !attempts.is_empty() => {
+                    match joined {
+                        Ok(Ok(result)) => break Ok(result),
+                        Ok(Err(e)) => {
+                            warn!("Sync attempt failed: {}", e);
+                        }
+                        Err(e) => {
+                            warn!("Sync attempt task failed: {}", e);
+                        }
+                    }
+                }
             }
-        };
-
-        // Cleanup. Dropping the browser (and advertiser) shuts their mDNS
-        // daemons down, which also terminates the browse bridge thread.
-        advertiser.stop()?;
-        drop(browser);
-
-        result
+        }
+        // Dropping the JoinSet aborts any attempts still in flight
     }
 
     /// Handle sync as the initiator (we send SyncHello first)
@@ -259,15 +330,14 @@ impl SyncHandler {
                 ssh_user: peer_user,
                 accept_sync,
             } => {
-                if version != PROTOCOL_VERSION {
-                    return Err(ConnectoError::Protocol(
-                        "Protocol version mismatch".to_string(),
-                    ));
-                }
+                negotiate_version(version).map_err(ConnectoError::Protocol)?;
 
                 if !accept_sync {
+                    // The peer outranks us (sync arbitration): keep listening
+                    // as responder; their initiator role will reach us.
                     return Err(ConnectoError::SyncRejected(
-                        "Peer declined sync".to_string(),
+                        "Peer declined sync (peer outranks us); waiting for them to initiate"
+                            .to_string(),
                     ));
                 }
 
@@ -277,10 +347,6 @@ impl SyncHandler {
                     })
                     .await;
 
-                // Add peer's key to our authorized_keys
-                debug!("Adding peer key to authorized_keys: {}", peer_comment);
-                self.key_manager.add_authorized_key(&peer_key)?;
-
                 let _ = event_tx
                     .send(SyncEvent::KeyReceived {
                         device_name: peer_name.clone(),
@@ -288,7 +354,9 @@ impl SyncHandler {
                     })
                     .await;
 
-                // Send SyncComplete
+                // Confirm the exchange. The peer's key is NOT installed yet:
+                // installation happens only after the peer confirms success,
+                // so an aborted exchange leaves no key behind.
                 let complete = Message::SyncComplete {
                     success: true,
                     message: "Key exchange successful".to_string(),
@@ -312,6 +380,10 @@ impl SyncHandler {
                         return Err(ConnectoError::Protocol("Expected SyncComplete".to_string()));
                     }
                 }
+
+                // Both sides confirmed; install the peer's key
+                debug!("Adding peer key to authorized_keys");
+                self.key_manager.add_authorized_key(&peer_key)?;
 
                 let peer_ip = peer_addr.ip();
                 let peer_port = peer_addr.port();
@@ -359,18 +431,13 @@ impl SyncHandler {
                 key_comment: peer_comment,
                 ssh_user: peer_user,
             } => {
-                if version != PROTOCOL_VERSION {
+                if let Err(reason) = negotiate_version(version) {
                     let error_msg = Message::Error {
                         code: 1,
-                        message: format!(
-                            "Protocol version mismatch: expected {}, got {}",
-                            PROTOCOL_VERSION, version
-                        ),
+                        message: reason.clone(),
                     };
                     write_message(&mut writer, &error_msg).await?;
-                    return Err(ConnectoError::Protocol(
-                        "Protocol version mismatch".to_string(),
-                    ));
+                    return Err(ConnectoError::Protocol(reason));
                 }
 
                 // Check if this is ourselves (same device trying to sync with itself)
@@ -387,18 +454,35 @@ impl SyncHandler {
                     return Err(ConnectoError::SyncWithSelf);
                 }
 
-                // Priority tie-breaker: higher priority wins (becomes the effective initiator)
-                // If we have lower priority, we yield and let them be the initiator
-                // This message exchange is just for the sync, so we always accept
+                // Sync arbitration: accept only if the initiator outranks us
+                // (higher priority; device name breaks ties). Otherwise we
+                // decline and keep listening - OUR initiator role outranks
+                // theirs and will be accepted by their responder.
+                if !initiator_wins(peer_priority, &peer_name, our_priority, &self.device_name) {
+                    debug!(
+                        "Declining sync from {} (priority {} does not outrank our {})",
+                        peer_name, peer_priority, our_priority
+                    );
+                    let decline = Message::SyncHelloAck {
+                        version: PROTOCOL_VERSION,
+                        device_name: self.device_name.clone(),
+                        public_key: String::new(),
+                        key_comment: String::new(),
+                        ssh_user: String::new(),
+                        accept_sync: false,
+                    };
+                    write_message(&mut writer, &decline).await?;
+                    return Err(ConnectoError::SyncRejected(format!(
+                        "Initiator {} does not outrank us; we will initiate instead",
+                        peer_name
+                    )));
+                }
+
                 let _ = event_tx
                     .send(SyncEvent::Connected {
                         device_name: peer_name.clone(),
                     })
                     .await;
-
-                // Add peer's key to our authorized_keys
-                debug!("Adding peer key to authorized_keys: {}", peer_comment);
-                self.key_manager.add_authorized_key(&peer_key)?;
 
                 let _ = event_tx
                     .send(SyncEvent::KeyReceived {
@@ -407,7 +491,9 @@ impl SyncHandler {
                     })
                     .await;
 
-                // Send SyncHelloAck with our key
+                // Send SyncHelloAck with our key. The peer's key is NOT
+                // installed yet: installation happens only after the
+                // initiator confirms success with SyncComplete.
                 let ack = Message::SyncHelloAck {
                     version: PROTOCOL_VERSION,
                     device_name: self.device_name.clone(),
@@ -436,12 +522,41 @@ impl SyncHandler {
                     }
                 }
 
-                // Send our SyncComplete
+                // The initiator confirmed; install its key. If installation
+                // fails we report the failure to the peer (so it does not
+                // install ours either) instead of confirming.
+                debug!("Adding peer key to authorized_keys");
+                if let Err(e) = self.key_manager.add_authorized_key(&peer_key) {
+                    let failure = Message::SyncComplete {
+                        success: false,
+                        message: format!("Key installation failed: {}", e),
+                    };
+                    let _ = write_message(&mut writer, &failure).await;
+                    return Err(e);
+                }
+
+                // Send our SyncComplete; on failure roll the freshly
+                // installed key back so a half-completed exchange leaves no
+                // SSH access behind.
                 let complete = Message::SyncComplete {
                     success: true,
                     message: "Key exchange successful".to_string(),
                 };
-                write_message(&mut writer, &complete).await?;
+                if let Err(e) = write_message(&mut writer, &complete).await {
+                    warn!(
+                        "Sync with {} failed after key install; rolling back: {}",
+                        peer_name, e
+                    );
+                    match self.key_manager.remove_authorized_key(&peer_key) {
+                        Ok(true) => info!("Rolled back key installed for {}", peer_name),
+                        Ok(false) => warn!("Rollback found no matching key in authorized_keys"),
+                        Err(rollback_err) => warn!(
+                            "Rollback failed; key for {} remains installed: {}",
+                            peer_name, rollback_err
+                        ),
+                    }
+                    return Err(e);
+                }
 
                 let peer_ip = peer_addr.ip();
                 let peer_port = peer_addr.port();
@@ -573,10 +688,11 @@ mod tests {
         let (event_tx_a, mut event_rx_a) = mpsc::channel(10);
         let (event_tx_b, mut event_rx_b) = mpsc::channel(10);
 
-        // Run B as responder
+        // Run B as responder with a LOW priority so A's initiation wins the
+        // arbitration (responders now accept only initiators that outrank them)
         let b_handle = tokio::spawn(async move {
             let (stream, peer_addr) = listener.accept().await.unwrap();
-            let our_priority: u64 = rand::thread_rng().gen();
+            let our_priority: u64 = 1;
             let ssh_user = "bob".to_string();
             handler_b
                 .handle_as_responder(stream, peer_addr, our_priority, &ssh_user, event_tx_b)
@@ -586,8 +702,8 @@ mod tests {
         // Give B time to start
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // Run A as initiator
-        let our_priority: u64 = rand::thread_rng().gen();
+        // Run A as initiator with a HIGH priority
+        let our_priority: u64 = u64::MAX;
         let ssh_user = "alice".to_string();
         let result_a = handler_a
             .handle_as_initiator(&addr_str, our_priority, &ssh_user, event_tx_a)
@@ -630,5 +746,302 @@ mod tests {
             events_b.push(event);
         }
         assert!(!events_b.is_empty());
+    }
+
+    #[test]
+    fn test_initiator_wins_arbitration() {
+        // Higher priority wins regardless of name
+        assert!(initiator_wins(10, "A", 5, "Z"));
+        assert!(!initiator_wins(5, "Z", 10, "A"));
+
+        // Equal priority: lexicographically greater device name wins
+        assert!(initiator_wins(5, "Device B", 5, "Device A"));
+        assert!(!initiator_wins(5, "Device A", 5, "Device B"));
+
+        // Fully equal (self-sync shape) never wins
+        assert!(!initiator_wins(5, "Device A", 5, "Device A"));
+    }
+
+    fn loopback_device(name: &str, addr: SocketAddr) -> crate::discovery::DiscoveredDevice {
+        crate::discovery::DiscoveredDevice {
+            name: name.to_string(),
+            hostname: "loopback.local.".to_string(),
+            addresses: vec![addr.ip()],
+            port: addr.port(),
+            instance_name: format!("{}.{}", name, SYNC_SERVICE_TYPE),
+        }
+    }
+
+    /// Drive two in-process SyncHandlers that discover and initiate to each
+    /// other SIMULTANEOUSLY (the deadlock scenario from the architecture
+    /// review) and assert both complete with exchanged keys.
+    async fn run_mutual_sync(priority_a: u64, priority_b: u64) {
+        let temp_dir_a = TempDir::new().unwrap();
+        let temp_dir_b = TempDir::new().unwrap();
+        let ssh_dir_a = temp_dir_a.path().join(".ssh");
+        let ssh_dir_b = temp_dir_b.path().join(".ssh");
+
+        let key_pair_a = SshKeyPair::generate(KeyAlgorithm::Ed25519, "alice@device-a").unwrap();
+        let key_pair_b = SshKeyPair::generate(KeyAlgorithm::Ed25519, "bob@device-b").unwrap();
+
+        let handler_a = SyncHandler::new(
+            KeyManager::with_dir(ssh_dir_a.clone()),
+            "Device A",
+            key_pair_a,
+        );
+        let handler_b = SyncHandler::new(
+            KeyManager::with_dir(ssh_dir_b.clone()),
+            "Device B",
+            key_pair_b,
+        );
+
+        let listener_a = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener_b = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr_a = listener_a.local_addr().unwrap();
+        let addr_b = listener_b.local_addr().unwrap();
+
+        let (peer_tx_a, peer_rx_a) = mpsc::channel(4);
+        let (peer_tx_b, peer_rx_b) = mpsc::channel(4);
+        let (event_tx_a, _event_rx_a) = mpsc::channel(64);
+        let (event_tx_b, _event_rx_b) = mpsc::channel(64);
+
+        // Both sides "discover" each other at the same time
+        peer_tx_a
+            .send(DiscoveryEvent::DeviceFound(loopback_device(
+                "Device B", addr_b,
+            )))
+            .await
+            .unwrap();
+        peer_tx_b
+            .send(DiscoveryEvent::DeviceFound(loopback_device(
+                "Device A", addr_a,
+            )))
+            .await
+            .unwrap();
+
+        let task_a = {
+            let handler = handler_a.clone();
+            tokio::spawn(async move {
+                handler
+                    .run_loop(listener_a, peer_rx_a, priority_a, 10, event_tx_a)
+                    .await
+            })
+        };
+        let task_b = {
+            let handler = handler_b.clone();
+            tokio::spawn(async move {
+                handler
+                    .run_loop(listener_b, peer_rx_b, priority_b, 10, event_tx_b)
+                    .await
+            })
+        };
+
+        let (result_a, result_b) = tokio::time::timeout(Duration::from_secs(8), async move {
+            (task_a.await.unwrap(), task_b.await.unwrap())
+        })
+        .await
+        .expect("mutual simultaneous sync deadlocked");
+
+        let result_a = result_a.expect("sync A failed");
+        let result_b = result_b.expect("sync B failed");
+        assert_eq!(result_a.peer_name, "Device B");
+        assert_eq!(result_b.peer_name, "Device A");
+
+        // Keep the discovery channels open until both syncs completed
+        drop(peer_tx_a);
+        drop(peer_tx_b);
+
+        let keys_a = KeyManager::with_dir(ssh_dir_a)
+            .list_authorized_keys()
+            .unwrap();
+        let keys_b = KeyManager::with_dir(ssh_dir_b)
+            .list_authorized_keys()
+            .unwrap();
+        assert_eq!(keys_a.len(), 1, "A must hold exactly B's key");
+        assert!(keys_a[0].contains("bob@device-b"));
+        assert_eq!(keys_b.len(), 1, "B must hold exactly A's key");
+        assert!(keys_b[0].contains("alice@device-a"));
+    }
+
+    #[tokio::test]
+    async fn test_mutual_simultaneous_sync_converges() {
+        run_mutual_sync(u64::MAX, 1).await;
+    }
+
+    #[tokio::test]
+    async fn test_mutual_simultaneous_sync_converges_on_equal_priorities() {
+        // Equal priorities fall back to the device-name tie-break
+        run_mutual_sync(7, 7).await;
+    }
+
+    #[tokio::test]
+    async fn test_responder_rejects_initiator_it_outranks() {
+        let temp_dir = TempDir::new().unwrap();
+        let ssh_dir = temp_dir.path().join(".ssh");
+        let key_pair = SshKeyPair::generate(KeyAlgorithm::Ed25519, "bob@responder").unwrap();
+        let handler =
+            SyncHandler::new(KeyManager::with_dir(ssh_dir.clone()), "Responder", key_pair);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (event_tx, _event_rx) = mpsc::channel(16);
+
+        let responder = tokio::spawn(async move {
+            let (stream, peer_addr) = listener.accept().await.unwrap();
+            handler
+                .handle_as_responder(stream, peer_addr, 1000, "bob", event_tx)
+                .await
+        });
+
+        // Raw initiator with a LOWER priority
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let initiator_key = SshKeyPair::generate(KeyAlgorithm::Ed25519, "eve@initiator").unwrap();
+        let hello = Message::SyncHello {
+            version: PROTOCOL_VERSION,
+            device_name: "Initiator".to_string(),
+            initiator_priority: 5,
+            public_key: initiator_key.public_key.clone(),
+            key_comment: initiator_key.comment.clone(),
+            ssh_user: "eve".to_string(),
+        };
+        write_message(&mut writer, &hello).await.unwrap();
+
+        let ack = read_message(&mut reader, HANDSHAKE_READ_TIMEOUT)
+            .await
+            .unwrap();
+        match ack {
+            Message::SyncHelloAck { accept_sync, .. } => assert!(!accept_sync),
+            other => panic!("Expected SyncHelloAck, got {:?}", other),
+        }
+
+        let result = responder.await.unwrap();
+        assert!(matches!(result, Err(ConnectoError::SyncRejected(_))));
+
+        // The declined initiator's key must NOT be installed
+        let keys = KeyManager::with_dir(ssh_dir)
+            .list_authorized_keys()
+            .unwrap();
+        assert!(keys.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_responder_installs_nothing_without_initiator_confirmation() {
+        let temp_dir = TempDir::new().unwrap();
+        let ssh_dir = temp_dir.path().join(".ssh");
+        let key_pair = SshKeyPair::generate(KeyAlgorithm::Ed25519, "bob@responder").unwrap();
+        let handler =
+            SyncHandler::new(KeyManager::with_dir(ssh_dir.clone()), "Responder", key_pair);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (event_tx, _event_rx) = mpsc::channel(16);
+
+        let responder = tokio::spawn(async move {
+            let (stream, peer_addr) = listener.accept().await.unwrap();
+            handler
+                .handle_as_responder(stream, peer_addr, 1, "bob", event_tx)
+                .await
+        });
+
+        // Initiator that wins arbitration, reads the ack... then vanishes
+        // without ever confirming with SyncComplete.
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let initiator_key = SshKeyPair::generate(KeyAlgorithm::Ed25519, "eve@initiator").unwrap();
+        let hello = Message::SyncHello {
+            version: PROTOCOL_VERSION,
+            device_name: "Initiator".to_string(),
+            initiator_priority: u64::MAX,
+            public_key: initiator_key.public_key.clone(),
+            key_comment: initiator_key.comment.clone(),
+            ssh_user: "eve".to_string(),
+        };
+        write_message(&mut writer, &hello).await.unwrap();
+
+        let ack = read_message(&mut reader, HANDSHAKE_READ_TIMEOUT)
+            .await
+            .unwrap();
+        match ack {
+            Message::SyncHelloAck { accept_sync, .. } => assert!(accept_sync),
+            other => panic!("Expected SyncHelloAck, got {:?}", other),
+        }
+        drop(writer);
+        drop(reader);
+
+        let result = responder.await.unwrap();
+        assert!(result.is_err(), "responder must fail without confirmation");
+
+        // Regression: the key used to be installed BEFORE the exchange was
+        // confirmed; an aborted exchange must leave authorized_keys empty.
+        let keys = KeyManager::with_dir(ssh_dir)
+            .list_authorized_keys()
+            .unwrap();
+        assert!(keys.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_initiator_installs_nothing_when_rejected_or_peer_fails() {
+        for peer_succeeds_handshake in [false, true] {
+            let temp_dir = TempDir::new().unwrap();
+            let ssh_dir = temp_dir.path().join(".ssh");
+            let key_pair = SshKeyPair::generate(KeyAlgorithm::Ed25519, "alice@initiator").unwrap();
+            let handler =
+                SyncHandler::new(KeyManager::with_dir(ssh_dir.clone()), "Initiator", key_pair);
+
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap().to_string();
+            let responder_key =
+                SshKeyPair::generate(KeyAlgorithm::Ed25519, "mallory@responder").unwrap();
+
+            // Scripted responder: either declines outright, or accepts and
+            // then reports failure in SyncComplete.
+            let scripted = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (reader, mut writer) = stream.into_split();
+                let mut reader = BufReader::new(reader);
+                read_message(&mut reader, HANDSHAKE_READ_TIMEOUT)
+                    .await
+                    .unwrap();
+
+                let ack = Message::SyncHelloAck {
+                    version: PROTOCOL_VERSION,
+                    device_name: "Responder".to_string(),
+                    public_key: responder_key.public_key.clone(),
+                    key_comment: responder_key.comment.clone(),
+                    ssh_user: "mallory".to_string(),
+                    accept_sync: peer_succeeds_handshake,
+                };
+                write_message(&mut writer, &ack).await.unwrap();
+
+                if peer_succeeds_handshake {
+                    // Consume the initiator's SyncComplete, then report failure
+                    read_message(&mut reader, HANDSHAKE_READ_TIMEOUT)
+                        .await
+                        .unwrap();
+                    let failure = Message::SyncComplete {
+                        success: false,
+                        message: "installation failed".to_string(),
+                    };
+                    write_message(&mut writer, &failure).await.unwrap();
+                }
+            });
+
+            let (event_tx, _event_rx) = mpsc::channel(16);
+            let result = handler
+                .handle_as_initiator(&addr, 42, "alice", event_tx)
+                .await;
+            assert!(result.is_err());
+            scripted.await.unwrap();
+
+            // Neither a rejection nor a peer-reported failure may leave the
+            // peer's key installed.
+            let keys = KeyManager::with_dir(ssh_dir)
+                .list_authorized_keys()
+                .unwrap();
+            assert!(keys.is_empty(), "no key may be installed on failure");
+        }
     }
 }

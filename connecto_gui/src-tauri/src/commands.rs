@@ -186,7 +186,14 @@ fn listener_event_message(event: &ServerEvent) -> String {
             device_name,
             address,
         } => format!("Pairing request from {} ({})", device_name, address),
-        ServerEvent::KeyReceived { comment } => format!("Received key: {}", comment),
+        ServerEvent::KeyReceived {
+            comment,
+            fingerprint,
+            verification_code,
+        } => format!(
+            "Received key: {} (fingerprint {}, verification code {})",
+            comment, fingerprint, verification_code
+        ),
         ServerEvent::PairingComplete { device_name } => {
             format!("Pairing complete with {}", device_name)
         }

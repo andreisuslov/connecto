@@ -48,6 +48,15 @@ pub async fn run(
             println!();
             success("Pairing successful!");
             println!();
+            // Derived locally from the key we sent; the listener derives the
+            // same code from the key it received, so matching codes rule out
+            // a man-in-the-middle that swapped the key.
+            info(&format!(
+                "Verification code: {} — confirm it matches on {}",
+                pairing_result.verification_code.green().bold(),
+                pairing_result.server_name.cyan()
+            ));
+            println!();
 
             // Determine the key path to use in SSH config
             let private_path = if let Some(path) = existing_key_path {

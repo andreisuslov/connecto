@@ -9,8 +9,9 @@ use connecto_core::fallback::FallbackHandler;
 use connecto_core::{
     discovery::{get_hostname, get_local_addresses, ServiceAdvertiser},
     keys::KeyManager,
-    protocol::{HandshakeServer, ServerEvent},
+    protocol::{HandshakeServer, PairingRequest, ServerEvent},
 };
+use dialoguer::Confirm;
 #[cfg(feature = "bluetooth")]
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -301,8 +302,42 @@ pub async fn run_with_adhoc(
     #[cfg(not(feature = "bluetooth"))]
     let _ = bluetooth_enabled;
 
-    // Start handshake server
-    let mut server = HandshakeServer::new(key_manager, &device_name).with_verification(verify);
+    // Start handshake server. With --verify each pairing request must be
+    // approved interactively before the key is installed; the prompt shows
+    // the received key's fingerprint and a verification code derived from the
+    // key material, to be compared with the code shown on the pairing device.
+    // Without --verify pairing is auto-accepted, and the fingerprint/code of
+    // what was installed are printed by the event handler below.
+    let mut server = HandshakeServer::new(key_manager, &device_name);
+    if verify {
+        // The callback blocks on user input; HandshakeServer invokes it via
+        // spawn_blocking, so this never stalls the async runtime.
+        server = server.with_approval(Box::new(|request: &PairingRequest| {
+            println!();
+            println!("{}", "Pairing approval required".yellow().bold());
+            println!(
+                "  {} Device:      {}",
+                "•".cyan(),
+                request.device_name.cyan().bold()
+            );
+            println!("  {} Key comment: {}", "•".cyan(), request.key_comment);
+            println!("  {} Fingerprint: {}", "•".cyan(), request.fingerprint);
+            println!(
+                "  {} Code:        {}",
+                "•".cyan(),
+                request.verification_code.green().bold()
+            );
+            println!(
+                "  {}",
+                "Compare the code with the one shown on the pairing device.".dimmed()
+            );
+            Confirm::new()
+                .with_prompt("Approve this pairing?")
+                .default(false)
+                .interact()
+                .unwrap_or(false)
+        }));
+    }
     let addr = server.listen(port).await?;
 
     println!();
@@ -355,8 +390,18 @@ pub async fn run_with_adhoc(
                         address
                     ));
                 }
-                ServerEvent::KeyReceived { comment } => {
+                ServerEvent::KeyReceived {
+                    comment,
+                    fingerprint,
+                    verification_code,
+                } => {
                     info(&format!("Received key: {}", comment.dimmed()));
+                    info(&format!("Fingerprint: {}", fingerprint));
+                    info(&format!(
+                        "Verification code: {} {}",
+                        verification_code.bold(),
+                        "(compare with the pairing device)".dimmed()
+                    ));
                 }
                 ServerEvent::PairingComplete { device_name } => {
                     println!();
@@ -398,8 +443,10 @@ pub async fn run_with_adhoc(
         }
     });
 
-    // Run server
-    if continuous {
+    // Run server. Both modes race against Ctrl+C so the cleanup below
+    // (mDNS unregister, event task abort, Bluetooth stop, and the ad-hoc
+    // network Drop at the end of this scope) also runs on interrupt.
+    let server_result: Result<()> = if continuous {
         // Run continuously until Ctrl+C
         info("Running in continuous mode (Ctrl+C to stop)...");
         tokio::select! {
@@ -407,16 +454,25 @@ pub async fn run_with_adhoc(
                 if let Err(e) = result {
                     error(&format!("Server error: {}", e));
                 }
+                Ok(())
             }
             _ = tokio::signal::ctrl_c() => {
                 println!();
                 info("Shutting down...");
+                Ok(())
             }
         }
     } else {
         // Default: handle one pairing and exit
-        server.handle_one(event_tx).await?;
-    }
+        tokio::select! {
+            result = server.handle_one(event_tx) => result.map_err(Into::into),
+            _ = tokio::signal::ctrl_c() => {
+                println!();
+                info("Shutting down...");
+                Ok(())
+            }
+        }
+    };
 
     // Clean up
     advertiser.stop()?;
@@ -428,6 +484,7 @@ pub async fn run_with_adhoc(
         let _ = handler.stop_bluetooth_advertising().await;
     }
 
+    server_result?;
     success("Connecto listener stopped");
     Ok(())
 }

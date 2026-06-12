@@ -3,7 +3,7 @@
 //! Defines the protocol for exchanging SSH keys between devices
 
 use crate::error::{ConnectoError, Result};
-use crate::keys::{KeyManager, SshKeyPair};
+use crate::keys::{fingerprint_sha256, KeyManager, SshKeyPair};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -12,11 +12,85 @@ use tokio::io::{
     AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
 };
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
+use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
-/// Protocol version for compatibility checking
+/// Current protocol version.
+///
+/// # Version policy
+///
+/// A peer is accepted when its advertised version lies in
+/// [`MIN_SUPPORTED_VERSION`]`..=`[`PROTOCOL_VERSION`]. We always reply with
+/// our own version, so after the hello exchange both sides operate at
+/// `min(theirs, ours)`. Versions outside the supported range (older than
+/// [`MIN_SUPPORTED_VERSION`] or newer than this build) are rejected with a
+/// [`Message::Error`]; a newer peer is expected to retry at a version we
+/// support. The check is centralized in [`negotiate_version`] and used by the
+/// handshake server, the handshake client, and both sync roles.
 pub const PROTOCOL_VERSION: u32 = 1;
+
+/// Oldest peer protocol version this build still accepts
+pub const MIN_SUPPORTED_VERSION: u32 = 1;
+
+/// Maximum number of pairing handshakes [`HandshakeServer::run`] serves concurrently
+const MAX_CONCURRENT_HANDSHAKES: usize = 8;
+
+/// Validate a peer's protocol version against the supported range
+///
+/// Returns the effective version to operate at (`min(peer, ours)`), or a
+/// human-readable rejection reason. See [`PROTOCOL_VERSION`] for the policy.
+pub fn negotiate_version(peer_version: u32) -> std::result::Result<u32, String> {
+    if (MIN_SUPPORTED_VERSION..=PROTOCOL_VERSION).contains(&peer_version) {
+        Ok(peer_version.min(PROTOCOL_VERSION))
+    } else {
+        Err(format!(
+            "Unsupported protocol version {} (supported: {} through {})",
+            peer_version, MIN_SUPPORTED_VERSION, PROTOCOL_VERSION
+        ))
+    }
+}
+
+/// Derive the 6-digit pairing verification code for a public key.
+///
+/// Derivation: parse the OpenSSH public key, compute its SHA-256 fingerprint,
+/// interpret the first four bytes of the raw digest as a big-endian `u32`,
+/// reduce it modulo 1,000,000, and zero-pad to six digits.
+///
+/// Both sides derive the code independently from key material rather than
+/// trusting a value sent over the wire: the listening side derives it from
+/// the key it RECEIVED in [`Message::KeyExchange`], while the pairing side
+/// derives it from the key it SENT. The codes match only if the same key
+/// crossed the wire, so a man-in-the-middle that substitutes its own key
+/// changes the code displayed on the listening side.
+pub fn verification_code_for_key(public_key_openssh: &str) -> Result<String> {
+    let public_key = SshKeyPair::parse_public_key(public_key_openssh)?;
+    let digest = public_key.fingerprint(ssh_key::HashAlg::Sha256);
+    let bytes = digest.as_bytes();
+    let n = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    Ok(format!("{:06}", n % 1_000_000))
+}
+
+/// Details of an incoming pairing request, handed to the [`ApprovalCallback`]
+#[derive(Debug, Clone)]
+pub struct PairingRequest {
+    /// Name the connecting device announced in its `Hello`
+    pub device_name: String,
+    /// Comment field of the received public key
+    pub key_comment: String,
+    /// SHA-256 fingerprint of the received public key
+    pub fingerprint: String,
+    /// Code derived from the received key; see [`verification_code_for_key`]
+    pub verification_code: String,
+}
+
+/// Callback consulted before a received key is installed.
+///
+/// Returning `false` rejects the pairing: the connecting party gets a
+/// [`Message::Error`] and the key is NOT installed. The callback may block
+/// (e.g. an interactive confirmation prompt); the server invokes it via
+/// `tokio::task::spawn_blocking`, so it never blocks the async runtime.
+pub type ApprovalCallback = Box<dyn Fn(&PairingRequest) -> bool + Send + Sync>;
 
 /// Maximum length in bytes of a single newline-delimited protocol message
 pub(crate) const MAX_MESSAGE_LEN: u64 = 64 * 1024;
@@ -151,6 +225,10 @@ pub enum ServerEvent {
     },
     KeyReceived {
         comment: String,
+        /// SHA-256 fingerprint of the received public key
+        fingerprint: String,
+        /// Code derived from the received key; see [`verification_code_for_key`]
+        verification_code: String,
     },
     PairingComplete {
         device_name: String,
@@ -165,23 +243,29 @@ pub struct HandshakeServer {
     listener: Option<TcpListener>,
     key_manager: Arc<KeyManager>,
     device_name: String,
-    require_verification: bool,
+    approval: Option<Arc<ApprovalCallback>>,
 }
 
 impl HandshakeServer {
     /// Create a new handshake server
+    ///
+    /// Without an [`ApprovalCallback`] (see [`Self::with_approval`]) every
+    /// well-formed pairing request is auto-accepted.
     pub fn new(key_manager: KeyManager, device_name: &str) -> Self {
         Self {
             listener: None,
             key_manager: Arc::new(key_manager),
             device_name: device_name.to_string(),
-            require_verification: false,
+            approval: None,
         }
     }
 
-    /// Enable verification code requirement
-    pub fn with_verification(mut self, require: bool) -> Self {
-        self.require_verification = require;
+    /// Gate key installation behind an approval callback
+    ///
+    /// The callback runs after the peer's key has been received and before it
+    /// is installed; see [`ApprovalCallback`] for the contract.
+    pub fn with_approval(mut self, callback: ApprovalCallback) -> Self {
+        self.approval = Some(Arc::new(callback));
         self
     }
 
@@ -200,6 +284,12 @@ impl HandshakeServer {
     }
 
     /// Accept and handle incoming connections
+    ///
+    /// Per-client handshakes run as tasks tracked in a [`JoinSet`], with at
+    /// most [`MAX_CONCURRENT_HANDSHAKES`] in flight; excess connections are
+    /// dropped. The loop exits when the event channel is closed (every
+    /// receiver dropped), after which in-flight handshakes are drained with a
+    /// short timeout.
     pub async fn run(&mut self, event_tx: mpsc::Sender<ServerEvent>) -> Result<()> {
         let listener = self
             .listener
@@ -209,39 +299,72 @@ impl HandshakeServer {
         let addr = listener.local_addr()?;
         let _ = event_tx.send(ServerEvent::Started { address: addr }).await;
 
+        let mut handshakes: JoinSet<()> = JoinSet::new();
+        let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_HANDSHAKES));
+
         loop {
-            match listener.accept().await {
-                Ok((stream, peer_addr)) => {
-                    info!("Client connected from {}", peer_addr);
-                    let _ = event_tx
-                        .send(ServerEvent::ClientConnected { address: peer_addr })
-                        .await;
+            // Reap finished handshake tasks so the set does not grow unboundedly
+            while handshakes.try_join_next().is_some() {}
 
-                    let key_manager = Arc::clone(&self.key_manager);
-                    let device_name = self.device_name.clone();
-                    let require_verification = self.require_verification;
-                    let event_tx = event_tx.clone();
-
-                    tokio::spawn(async move {
-                        if let Err(e) = handle_client(
-                            stream,
-                            peer_addr,
-                            key_manager,
-                            device_name,
-                            require_verification,
-                            event_tx,
-                        )
-                        .await
-                        {
-                            error!("Error handling client {}: {}", peer_addr, e);
-                        }
-                    });
+            tokio::select! {
+                _ = event_tx.closed() => {
+                    debug!("Event channel closed; shutting handshake server down");
+                    break;
                 }
-                Err(e) => {
-                    warn!("Failed to accept connection: {}", e);
+                accepted = listener.accept() => match accepted {
+                    Ok((stream, peer_addr)) => {
+                        let Ok(permit) = Arc::clone(&semaphore).try_acquire_owned() else {
+                            warn!(
+                                "Too many concurrent handshakes; dropping connection from {}",
+                                peer_addr
+                            );
+                            continue;
+                        };
+
+                        info!("Client connected from {}", peer_addr);
+                        let _ = event_tx
+                            .send(ServerEvent::ClientConnected { address: peer_addr })
+                            .await;
+
+                        let key_manager = Arc::clone(&self.key_manager);
+                        let device_name = self.device_name.clone();
+                        let approval = self.approval.clone();
+                        let event_tx = event_tx.clone();
+
+                        handshakes.spawn(async move {
+                            let _permit = permit;
+                            if let Err(e) = handle_client(
+                                stream,
+                                peer_addr,
+                                key_manager,
+                                device_name,
+                                approval,
+                                event_tx,
+                            )
+                            .await
+                            {
+                                error!("Error handling client {}: {}", peer_addr, e);
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        warn!("Failed to accept connection: {}", e);
+                    }
                 }
             }
         }
+
+        // Give in-flight handshakes a short grace period, then abort them
+        let drain = async { while handshakes.join_next().await.is_some() {} };
+        if tokio::time::timeout(Duration::from_secs(5), drain)
+            .await
+            .is_err()
+        {
+            warn!("Timed out draining in-flight handshakes; aborting them");
+            handshakes.shutdown().await;
+        }
+
+        Ok(())
     }
 
     /// Handle a single pairing request (useful for one-shot mode)
@@ -268,7 +391,7 @@ impl HandshakeServer {
                 peer_addr,
                 Arc::clone(&self.key_manager),
                 self.device_name.clone(),
-                self.require_verification,
+                self.approval.clone(),
                 event_tx.clone(),
             )
             .await
@@ -296,7 +419,7 @@ async fn handle_client(
     peer_addr: SocketAddr,
     key_manager: Arc<KeyManager>,
     device_name: String,
-    require_verification: bool,
+    approval: Option<Arc<ApprovalCallback>>,
     event_tx: mpsc::Sender<ServerEvent>,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
@@ -310,18 +433,13 @@ async fn handle_client(
             version,
             device_name: client_name,
         } => {
-            if version != PROTOCOL_VERSION {
+            if let Err(reason) = negotiate_version(version) {
                 let error_msg = Message::Error {
                     code: 1,
-                    message: format!(
-                        "Protocol version mismatch: expected {}, got {}",
-                        PROTOCOL_VERSION, version
-                    ),
+                    message: reason.clone(),
                 };
                 write_message(&mut writer, &error_msg).await?;
-                return Err(ConnectoError::Handshake(
-                    "Protocol version mismatch".to_string(),
-                ));
+                return Err(ConnectoError::Handshake(reason));
             }
             client_name
         }
@@ -342,18 +460,16 @@ async fn handle_client(
         })
         .await;
 
-    // Generate verification code if required
-    let verification_code = if require_verification {
-        Some(generate_verification_code())
-    } else {
-        None
-    };
-
-    // Send HelloAck
+    // Send HelloAck. The legacy `verification_code` field stays in the wire
+    // format for compatibility but no longer carries a value: a code invented
+    // here and sent to the connecting party proves nothing, since the peer
+    // would merely echo back what we told it. The verification code is now
+    // derived from the key material itself once KeyExchange arrives; see
+    // [`verification_code_for_key`].
     let hello_ack = Message::HelloAck {
         version: PROTOCOL_VERSION,
         device_name: device_name.clone(),
-        verification_code: verification_code.clone(),
+        verification_code: None,
     };
     write_message(&mut writer, &hello_ack).await?;
 
@@ -368,29 +484,99 @@ async fn handle_client(
         } => {
             debug!("Received public key with comment: {}", comment);
 
+            // Validate the key and derive its identity material before
+            // anything is installed.
+            let fingerprint = match fingerprint_sha256(&public_key) {
+                Ok(fingerprint) => fingerprint,
+                Err(e) => {
+                    let reason = format!("Invalid public key: {}", e);
+                    let error_msg = Message::Error {
+                        code: 5,
+                        message: reason.clone(),
+                    };
+                    write_message(&mut writer, &error_msg).await?;
+                    return Err(ConnectoError::Handshake(reason));
+                }
+            };
+            let verification_code = verification_code_for_key(&public_key)?;
+
             let _ = event_tx
                 .send(ServerEvent::KeyReceived {
                     comment: comment.clone(),
+                    fingerprint: fingerprint.clone(),
+                    verification_code: verification_code.clone(),
                 })
                 .await;
 
-            // Add the key to authorized_keys
+            // Consult the approval callback (if any) BEFORE installing the
+            // key. The callback may block on user input, so it runs on the
+            // blocking thread pool.
+            let approved = match &approval {
+                None => true,
+                Some(callback) => {
+                    let callback = Arc::clone(callback);
+                    let request = PairingRequest {
+                        device_name: client_name.clone(),
+                        key_comment: comment.clone(),
+                        fingerprint: fingerprint.clone(),
+                        verification_code: verification_code.clone(),
+                    };
+                    tokio::task::spawn_blocking(move || callback(&request))
+                        .await
+                        .map_err(|e| {
+                            ConnectoError::Handshake(format!("Approval callback failed: {}", e))
+                        })?
+                }
+            };
+
+            if !approved {
+                info!("Pairing with {} rejected by approval callback", client_name);
+                let error_msg = Message::Error {
+                    code: 4,
+                    message: "Pairing rejected by user".to_string(),
+                };
+                write_message(&mut writer, &error_msg).await?;
+                return Err(ConnectoError::Handshake(
+                    "Pairing rejected by user".to_string(),
+                ));
+            }
+
+            // Install the key. Every failure after this point must roll the
+            // installation back so a half-completed exchange does not leave
+            // the peer with SSH access.
             key_manager.add_authorized_key(&public_key)?;
 
-            // Send KeyAccepted
-            let accepted = Message::KeyAccepted {
-                message: "Key added to authorized_keys".to_string(),
+            let post_install = async {
+                let accepted = Message::KeyAccepted {
+                    message: "Key added to authorized_keys".to_string(),
+                };
+                write_message(&mut writer, &accepted).await?;
+
+                // Get current user (USER on Unix, USERNAME on Windows)
+                let ssh_user = std::env::var("USER")
+                    .or_else(|_| std::env::var("USERNAME"))
+                    .unwrap_or_else(|_| "unknown".to_string());
+
+                let complete = Message::PairingComplete { ssh_user };
+                write_message(&mut writer, &complete).await?;
+                Ok::<(), ConnectoError>(())
             };
-            write_message(&mut writer, &accepted).await?;
 
-            // Get current user (USER on Unix, USERNAME on Windows)
-            let ssh_user = std::env::var("USER")
-                .or_else(|_| std::env::var("USERNAME"))
-                .unwrap_or_else(|_| "unknown".to_string());
-
-            // Send PairingComplete
-            let complete = Message::PairingComplete { ssh_user };
-            write_message(&mut writer, &complete).await?;
+            if let Err(e) = post_install.await {
+                warn!(
+                    "Pairing with {} failed after key install; rolling back: {}",
+                    client_name, e
+                );
+                match key_manager.remove_authorized_key(&public_key) {
+                    Ok(true) => info!("Rolled back key installed for {}", client_name),
+                    Ok(false) => warn!("Rollback found no matching key in authorized_keys"),
+                    Err(rollback_err) => warn!(
+                        "Rollback failed; key for {} remains installed: {}",
+                        client_name, rollback_err
+                    ),
+                }
+                return Err(e);
+            }
 
             let _ = event_tx
                 .send(ServerEvent::PairingComplete {
@@ -425,7 +611,15 @@ impl HandshakeClient {
     }
 
     /// Connect to a server and perform key exchange
+    ///
+    /// The returned [`PairingResult`] carries the verification code derived
+    /// from OUR public key (the key we sent); display it so the user can
+    /// compare it with the code shown on the listening device.
     pub async fn pair(&self, address: &str, key_pair: &SshKeyPair) -> Result<PairingResult> {
+        // Derived locally from the key we are about to send; the server
+        // derives the same code from what it receives.
+        let verification_code = verification_code_for_key(&key_pair.public_key)?;
+
         let stream = TcpStream::connect(address)
             .await
             .map_err(|e| ConnectoError::Network(format!("Failed to connect: {}", e)))?;
@@ -443,18 +637,16 @@ impl HandshakeClient {
         // Read HelloAck
         let hello_ack = read_message(&mut reader, HANDSHAKE_READ_TIMEOUT).await?;
 
-        let (server_name, verification_code) = match hello_ack {
+        let server_name = match hello_ack {
             Message::HelloAck {
                 version,
                 device_name,
-                verification_code,
+                // Legacy field: v1 servers sent a server-generated code here,
+                // which proved nothing. Ignored; see verification_code_for_key.
+                verification_code: _,
             } => {
-                if version != PROTOCOL_VERSION {
-                    return Err(ConnectoError::Handshake(
-                        "Protocol version mismatch".to_string(),
-                    ));
-                }
-                (device_name, verification_code)
+                negotiate_version(version).map_err(ConnectoError::Handshake)?;
+                device_name
             }
             Message::Error { message, .. } => {
                 return Err(ConnectoError::Handshake(message));
@@ -505,14 +697,9 @@ impl HandshakeClient {
 pub struct PairingResult {
     pub server_name: String,
     pub ssh_user: String,
-    pub verification_code: Option<String>,
-}
-
-/// Generate a random 4-digit verification code
-pub fn generate_verification_code() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    format!("{:04}", rng.gen_range(0..10000))
+    /// Code derived from OUR public key (see [`verification_code_for_key`]);
+    /// the user should compare it with the code shown on the listening device.
+    pub verification_code: String,
 }
 
 #[cfg(test)]
@@ -523,6 +710,52 @@ mod tests {
     #[test]
     fn test_protocol_version() {
         assert_eq!(PROTOCOL_VERSION, 1);
+        assert_eq!(MIN_SUPPORTED_VERSION, 1);
+    }
+
+    #[test]
+    fn test_negotiate_version_accepts_supported_range() {
+        for version in MIN_SUPPORTED_VERSION..=PROTOCOL_VERSION {
+            assert_eq!(negotiate_version(version), Ok(version));
+        }
+    }
+
+    #[test]
+    fn test_negotiate_version_rejects_out_of_range() {
+        assert!(negotiate_version(0).is_err());
+        assert!(negotiate_version(PROTOCOL_VERSION + 1).is_err());
+        assert!(negotiate_version(999).is_err());
+    }
+
+    #[test]
+    fn test_verification_code_format_and_determinism() {
+        use crate::keys::KeyAlgorithm;
+
+        let key_pair = SshKeyPair::generate(KeyAlgorithm::Ed25519, "code@test").unwrap();
+        let code = verification_code_for_key(&key_pair.public_key).unwrap();
+
+        assert_eq!(code.len(), 6);
+        assert!(code.chars().all(|c| c.is_ascii_digit()));
+        // Deterministic for the same key material
+        assert_eq!(
+            code,
+            verification_code_for_key(&key_pair.public_key).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_verification_code_known_fixture() {
+        // Same fixture as keys::tests::test_fingerprint_sha256_known_fixture;
+        // pins the derivation (first 4 digest bytes as BE u32, mod 1e6).
+        let public_key =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOe+ZEWqatUUD1EaBS1DRn/J0hKQPSiW0fLQ7a7Af96S fixture@connecto";
+        let code = verification_code_for_key(public_key).unwrap();
+        assert_eq!(code, "627765");
+    }
+
+    #[test]
+    fn test_verification_code_rejects_invalid_key() {
+        assert!(verification_code_for_key("not-a-key").is_err());
     }
 
     #[test]
@@ -629,21 +862,6 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_verification_code() {
-        let code = generate_verification_code();
-        assert_eq!(code.len(), 4);
-        assert!(code.chars().all(|c| c.is_ascii_digit()));
-    }
-
-    #[test]
-    fn test_generate_verification_code_uniqueness() {
-        let codes: Vec<_> = (0..100).map(|_| generate_verification_code()).collect();
-        // Not all codes should be the same (statistically very unlikely)
-        let unique: std::collections::HashSet<_> = codes.iter().collect();
-        assert!(unique.len() > 1);
-    }
-
-    #[test]
     fn test_handshake_client_creation() {
         let client = HandshakeClient::new("Test Client");
         assert_eq!(client.device_name, "Test Client");
@@ -654,12 +872,12 @@ mod tests {
         let result = PairingResult {
             server_name: "Server".to_string(),
             ssh_user: "user".to_string(),
-            verification_code: Some("1234".to_string()),
+            verification_code: "123456".to_string(),
         };
 
         assert_eq!(result.server_name, "Server");
         assert_eq!(result.ssh_user, "user");
-        assert_eq!(result.verification_code, Some("1234".to_string()));
+        assert_eq!(result.verification_code, "123456");
     }
 
     #[tokio::test]
@@ -670,17 +888,18 @@ mod tests {
 
         let server = HandshakeServer::new(key_manager, "Test Server");
         assert_eq!(server.device_name, "Test Server");
-        assert!(!server.require_verification);
+        assert!(server.approval.is_none());
     }
 
     #[tokio::test]
-    async fn test_handshake_server_with_verification() {
+    async fn test_handshake_server_with_approval() {
         let temp_dir = TempDir::new().unwrap();
         let ssh_dir = temp_dir.path().join(".ssh");
         let key_manager = KeyManager::with_dir(ssh_dir);
 
-        let server = HandshakeServer::new(key_manager, "Test Server").with_verification(true);
-        assert!(server.require_verification);
+        let server =
+            HandshakeServer::new(key_manager, "Test Server").with_approval(Box::new(|_| true));
+        assert!(server.approval.is_some());
     }
 
     #[tokio::test]
@@ -725,6 +944,11 @@ mod tests {
 
         assert_eq!(result.server_name, "Test Server");
         assert!(!result.ssh_user.is_empty());
+        // The client-side code is derived from the key it sent
+        assert_eq!(
+            result.verification_code,
+            verification_code_for_key(&key_pair.public_key).unwrap()
+        );
 
         // Verify key was added
         let key_manager = KeyManager::with_dir(ssh_dir);
@@ -741,6 +965,28 @@ mod tests {
             events.push(event);
         }
         assert!(!events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_run_exits_when_event_channel_closes() {
+        let temp_dir = TempDir::new().unwrap();
+        let ssh_dir = temp_dir.path().join(".ssh");
+        let key_manager = KeyManager::with_dir(ssh_dir);
+
+        let mut server = HandshakeServer::new(key_manager, "Test Server");
+        server.listen(0).await.unwrap();
+
+        let (event_tx, event_rx) = mpsc::channel(10);
+        let server_handle = tokio::spawn(async move { server.run(event_tx).await });
+
+        // Dropping the only receiver must shut the server loop down
+        drop(event_rx);
+
+        let result = tokio::time::timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("server.run did not exit after event channel closed")
+            .unwrap();
+        assert!(result.is_ok());
     }
 
     // Framing helper tests

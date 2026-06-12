@@ -77,7 +77,9 @@ pub use discovery::{
 pub use error::{ConnectoError, Result};
 pub use keys::{fingerprint_sha256, KeyAlgorithm, KeyManager, SshKeyPair};
 pub use protocol::{
-    HandshakeClient, HandshakeServer, Message, PairingResult, ServerEvent, PROTOCOL_VERSION,
+    negotiate_version, verification_code_for_key, ApprovalCallback, HandshakeClient,
+    HandshakeServer, Message, PairingRequest, PairingResult, ServerEvent, MIN_SUPPORTED_VERSION,
+    PROTOCOL_VERSION,
 };
 pub use ssh_config::{AddOutcome, HostEntry, SshConfig, CONNECTO_MARKER};
 pub use sync::{SyncEvent, SyncHandler, SyncResult, DEFAULT_SYNC_TIMEOUT_SECS, SYNC_SERVICE_TYPE};
