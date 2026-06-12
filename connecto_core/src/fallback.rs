@@ -1402,10 +1402,7 @@ impl FallbackHandler {
 
     /// Scan for Connecto devices via Bluetooth Low Energy (stub for non-bluetooth builds)
     #[cfg(not(feature = "bluetooth"))]
-    pub async fn scan_bluetooth(
-        &mut self,
-        _duration: Duration,
-    ) -> Result<Vec<()>> {
+    pub async fn scan_bluetooth(&mut self, _duration: Duration) -> Result<Vec<()>> {
         Ok(vec![])
     }
 
@@ -1434,7 +1431,10 @@ impl FallbackHandler {
         }
 
         if let Some(ref mut advertiser) = self.bluetooth_advertiser {
-            info!("Starting Bluetooth advertising: {} at {}:{}", name, ip, port);
+            info!(
+                "Starting Bluetooth advertising: {} at {}:{}",
+                name, ip, port
+            );
             advertiser.advertise(name, ip, port).await
         } else {
             Err(crate::error::ConnectoError::Bluetooth(

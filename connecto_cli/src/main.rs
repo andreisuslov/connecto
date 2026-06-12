@@ -286,10 +286,14 @@ async fn main() -> Result<()> {
             continuous,
             adhoc,
             bluetooth,
-        } => commands::listen::run_with_adhoc(port, name, verify, continuous, adhoc, bluetooth).await,
-        Commands::Scan { timeout, subnet, bluetooth } => {
-            commands::scan::run_with_options(timeout, false, subnet, bluetooth).await
+        } => {
+            commands::listen::run_with_adhoc(port, name, verify, continuous, adhoc, bluetooth).await
         }
+        Commands::Scan {
+            timeout,
+            subnet,
+            bluetooth,
+        } => commands::scan::run_with_options(timeout, false, subnet, bluetooth).await,
         Commands::Pair {
             target,
             comment,
@@ -998,7 +1002,11 @@ mod tests {
     fn test_scan_defaults() {
         let cli = Cli::try_parse_from(["connecto", "scan"]).unwrap();
         match cli.command {
-            Commands::Scan { timeout, subnet, bluetooth } => {
+            Commands::Scan {
+                timeout,
+                subnet,
+                bluetooth,
+            } => {
                 assert_eq!(timeout, 5);
                 assert!(subnet.is_empty());
                 assert!(!bluetooth);
@@ -1011,7 +1019,11 @@ mod tests {
     fn test_scan_with_subnet() {
         let cli = Cli::try_parse_from(["connecto", "scan", "--subnet", "10.0.0.0/24"]).unwrap();
         match cli.command {
-            Commands::Scan { timeout, subnet, bluetooth } => {
+            Commands::Scan {
+                timeout,
+                subnet,
+                bluetooth,
+            } => {
                 assert_eq!(timeout, 5);
                 assert_eq!(subnet, vec!["10.0.0.0/24"]);
                 assert!(!bluetooth);
@@ -1032,7 +1044,9 @@ mod tests {
         ])
         .unwrap();
         match cli.command {
-            Commands::Scan { subnet, bluetooth, .. } => {
+            Commands::Scan {
+                subnet, bluetooth, ..
+            } => {
                 assert_eq!(subnet.len(), 2);
                 assert_eq!(subnet[0], "10.0.0.0/24");
                 assert_eq!(subnet[1], "192.168.1.0/24");

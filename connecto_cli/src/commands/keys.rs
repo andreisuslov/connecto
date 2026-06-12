@@ -178,6 +178,6 @@ async fn remove_key(key_manager: &KeyManager, target: &str) -> Result<()> {
 mod tests {
     #[test]
     fn test_module_compiles() {
-        assert!(true);
+        // Compiling this test is the assertion
     }
 }

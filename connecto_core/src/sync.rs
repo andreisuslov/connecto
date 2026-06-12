@@ -2,15 +2,17 @@
 //!
 //! Enables two devices to simultaneously exchange SSH keys so both can SSH to each other.
 
+use crate::discovery::{DiscoveryEvent, ServiceAdvertiser, ServiceBrowser};
 use crate::error::{ConnectoError, Result};
 use crate::keys::{KeyManager, SshKeyPair};
-use crate::protocol::{Message, PROTOCOL_VERSION};
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use crate::protocol::{
+    read_message, write_message, Message, HANDSHAKE_READ_TIMEOUT, PROTOCOL_VERSION,
+};
 use rand::Rng;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::BufReader;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -60,31 +62,6 @@ pub struct SyncResult {
     pub peer_port: u16,
 }
 
-/// A discovered sync peer
-#[derive(Debug, Clone)]
-struct SyncPeer {
-    device_name: String,
-    addresses: Vec<IpAddr>,
-    port: u16,
-    #[allow(dead_code)]
-    instance_name: String,
-}
-
-impl SyncPeer {
-    fn primary_address(&self) -> Option<IpAddr> {
-        self.addresses
-            .iter()
-            .find(|addr| addr.is_ipv4())
-            .or(self.addresses.first())
-            .copied()
-    }
-
-    fn connection_string(&self) -> Option<String> {
-        self.primary_address()
-            .map(|addr| format!("{}:{}", addr, self.port))
-    }
-}
-
 /// Handler for bidirectional sync operations
 pub struct SyncHandler {
     key_manager: Arc<KeyManager>,
@@ -129,13 +106,16 @@ impl SyncHandler {
             })
             .await;
 
-        // Start mDNS advertising
-        let mut advertiser = SyncAdvertiser::new()?;
+        // Start mDNS advertising on the sync service type
+        let mut advertiser = ServiceAdvertiser::new_for_service(SYNC_SERVICE_TYPE)?;
         advertiser.advertise(&self.device_name, local_addr.port())?;
 
-        // Start browsing for peers
+        // Start browsing for peers, skipping our own advertisement
         let _ = event_tx.send(SyncEvent::Searching).await;
-        let browser = SyncBrowser::new()?;
+        let browser = ServiceBrowser::new_for_service(SYNC_SERVICE_TYPE)?
+            .skip_instances_containing(&self.device_name);
+        let mut peer_rx = browser.browse()?;
+        let mut browse_active = true;
 
         // Generate our initiator priority
         let our_priority: u64 = rand::thread_rng().gen();
@@ -145,20 +125,6 @@ impl SyncHandler {
         let ssh_user = std::env::var("USER")
             .or_else(|_| std::env::var("USERNAME"))
             .unwrap_or_else(|_| "unknown".to_string());
-
-        // Create channels for coordination
-        let (peer_found_tx, mut peer_found_rx) = mpsc::channel::<SyncPeer>(10);
-
-        // Clone values for the browser task
-        let device_name = self.device_name.clone();
-        let browse_timeout = Duration::from_secs(timeout_secs);
-
-        // Start browser in background
-        let browser_handle = tokio::spawn(async move {
-            browser
-                .find_peers(&device_name, browse_timeout, peer_found_tx)
-                .await
-        });
 
         // Main event loop - either accept incoming connection or connect to found peer
         let timeout = tokio::time::sleep(Duration::from_secs(timeout_secs));
@@ -204,38 +170,52 @@ impl SyncHandler {
                 }
 
                 // Found a peer via mDNS
-                Some(peer) = peer_found_rx.recv() => {
-                    info!("Found sync peer via mDNS: {}", peer.device_name);
-                    let _ = event_tx.send(SyncEvent::PeerFound {
-                        device_name: peer.device_name.clone(),
-                        address: peer.primary_address()
-                            .map(|ip| SocketAddr::new(ip, peer.port))
-                            .unwrap_or_else(|| SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), peer.port)),
-                    }).await;
+                event = peer_rx.recv(), if browse_active => {
+                    match event {
+                        Some(DiscoveryEvent::DeviceFound(peer)) => {
+                            info!("Found sync peer via mDNS: {}", peer.name);
+                            let _ = event_tx.send(SyncEvent::PeerFound {
+                                device_name: peer.name.clone(),
+                                address: peer.primary_address()
+                                    .map(|ip| SocketAddr::new(ip, peer.port))
+                                    .unwrap_or_else(|| SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), peer.port)),
+                            }).await;
 
-                    if let Some(conn_str) = peer.connection_string() {
-                        // Try to connect as initiator
-                        match self.handle_as_initiator(
-                            &conn_str,
-                            our_priority,
-                            &ssh_user,
-                            event_tx.clone(),
-                        ).await {
-                            Ok(result) => break Ok(result),
-                            Err(e) => {
-                                warn!("Initiator sync failed: {}", e);
-                                // Continue waiting - maybe they'll connect to us
-                                continue;
+                            if let Some(conn_str) = peer.connection_string() {
+                                // Try to connect as initiator
+                                match self.handle_as_initiator(
+                                    &conn_str,
+                                    our_priority,
+                                    &ssh_user,
+                                    event_tx.clone(),
+                                ).await {
+                                    Ok(result) => break Ok(result),
+                                    Err(e) => {
+                                        warn!("Initiator sync failed: {}", e);
+                                        // Continue waiting - maybe they'll connect to us
+                                        continue;
+                                    }
+                                }
                             }
+                        }
+                        Some(_) => {
+                            // Other discovery events are not relevant for sync
+                        }
+                        None => {
+                            // Browse channel closed; disable this select arm
+                            // and keep waiting for incoming connections.
+                            debug!("Sync peer browse channel closed");
+                            browse_active = false;
                         }
                     }
                 }
             }
         };
 
-        // Cleanup
-        browser_handle.abort();
+        // Cleanup. Dropping the browser (and advertiser) shuts their mDNS
+        // daemons down, which also terminates the browse bridge thread.
         advertiser.stop()?;
+        drop(browser);
 
         result
     }
@@ -255,7 +235,6 @@ impl SyncHandler {
         let peer_addr = stream.peer_addr()?;
         let (reader, mut writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
-        let mut line = String::new();
 
         // Send SyncHello
         let sync_hello = Message::SyncHello {
@@ -266,12 +245,10 @@ impl SyncHandler {
             key_comment: self.key_pair.comment.clone(),
             ssh_user: ssh_user.to_string(),
         };
-        writer.write_all(sync_hello.to_json()?.as_bytes()).await?;
+        write_message(&mut writer, &sync_hello).await?;
 
         // Read SyncHelloAck
-        line.clear();
-        reader.read_line(&mut line).await?;
-        let response = Message::from_json(&line)?;
+        let response = read_message(&mut reader, HANDSHAKE_READ_TIMEOUT).await?;
 
         match response {
             Message::SyncHelloAck {
@@ -316,12 +293,10 @@ impl SyncHandler {
                     success: true,
                     message: "Key exchange successful".to_string(),
                 };
-                writer.write_all(complete.to_json()?.as_bytes()).await?;
+                write_message(&mut writer, &complete).await?;
 
                 // Read SyncComplete from peer
-                line.clear();
-                reader.read_line(&mut line).await?;
-                let peer_complete = Message::from_json(&line)?;
+                let peer_complete = read_message(&mut reader, HANDSHAKE_READ_TIMEOUT).await?;
 
                 match peer_complete {
                     Message::SyncComplete { success, message } => {
@@ -371,12 +346,9 @@ impl SyncHandler {
     ) -> Result<SyncResult> {
         let (reader, mut writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
-        let mut line = String::new();
 
         // Read SyncHello
-        line.clear();
-        reader.read_line(&mut line).await?;
-        let hello = Message::from_json(&line)?;
+        let hello = read_message(&mut reader, HANDSHAKE_READ_TIMEOUT).await?;
 
         match hello {
             Message::SyncHello {
@@ -395,7 +367,7 @@ impl SyncHandler {
                             PROTOCOL_VERSION, version
                         ),
                     };
-                    writer.write_all(error_msg.to_json()?.as_bytes()).await?;
+                    write_message(&mut writer, &error_msg).await?;
                     return Err(ConnectoError::Protocol(
                         "Protocol version mismatch".to_string(),
                     ));
@@ -411,7 +383,7 @@ impl SyncHandler {
                         ssh_user: String::new(),
                         accept_sync: false,
                     };
-                    writer.write_all(error_msg.to_json()?.as_bytes()).await?;
+                    write_message(&mut writer, &error_msg).await?;
                     return Err(ConnectoError::SyncWithSelf);
                 }
 
@@ -444,12 +416,10 @@ impl SyncHandler {
                     ssh_user: ssh_user.to_string(),
                     accept_sync: true,
                 };
-                writer.write_all(ack.to_json()?.as_bytes()).await?;
+                write_message(&mut writer, &ack).await?;
 
                 // Read SyncComplete from peer
-                line.clear();
-                reader.read_line(&mut line).await?;
-                let peer_complete = Message::from_json(&line)?;
+                let peer_complete = read_message(&mut reader, HANDSHAKE_READ_TIMEOUT).await?;
 
                 match peer_complete {
                     Message::SyncComplete { success, message } => {
@@ -471,7 +441,7 @@ impl SyncHandler {
                     success: true,
                     message: "Key exchange successful".to_string(),
                 };
-                writer.write_all(complete.to_json()?.as_bytes()).await?;
+                write_message(&mut writer, &complete).await?;
 
                 let peer_ip = peer_addr.ip();
                 let peer_port = peer_addr.port();
@@ -495,155 +465,10 @@ impl SyncHandler {
                     code: 2,
                     message: "Expected SyncHello message".to_string(),
                 };
-                writer.write_all(error_msg.to_json()?.as_bytes()).await?;
+                write_message(&mut writer, &error_msg).await?;
                 Err(ConnectoError::Protocol("Expected SyncHello".to_string()))
             }
         }
-    }
-}
-
-/// mDNS service advertiser for sync
-struct SyncAdvertiser {
-    daemon: ServiceDaemon,
-    service_fullname: Option<String>,
-}
-
-impl SyncAdvertiser {
-    fn new() -> Result<Self> {
-        let daemon = ServiceDaemon::new().map_err(|e| {
-            ConnectoError::Discovery(format!("Failed to create mDNS daemon: {}", e))
-        })?;
-
-        Ok(Self {
-            daemon,
-            service_fullname: None,
-        })
-    }
-
-    fn advertise(&mut self, device_name: &str, port: u16) -> Result<()> {
-        let hostname = hostname::get()
-            .map(|h: std::ffi::OsString| h.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "unknown".to_string());
-
-        let service_hostname = format!("{}.local.", hostname);
-        let instance_name = format!("{} ({})", device_name, hostname);
-
-        let service_info = ServiceInfo::new(
-            SYNC_SERVICE_TYPE,
-            &instance_name,
-            &service_hostname,
-            "",
-            port,
-            None,
-        )
-        .map_err(|e| ConnectoError::Discovery(format!("Failed to create service info: {}", e)))?;
-
-        let fullname = service_info.get_fullname().to_string();
-
-        self.daemon
-            .register(service_info)
-            .map_err(|e| ConnectoError::Discovery(format!("Failed to register service: {}", e)))?;
-
-        self.service_fullname = Some(fullname.clone());
-        info!("Advertising sync service: {}", fullname);
-
-        Ok(())
-    }
-
-    fn stop(&mut self) -> Result<()> {
-        if let Some(fullname) = self.service_fullname.take() {
-            // Ignore errors during unregister - the daemon may already be shut down
-            let _ = self.daemon.unregister(&fullname);
-            info!("Stopped advertising sync service");
-        }
-        Ok(())
-    }
-}
-
-impl Drop for SyncAdvertiser {
-    fn drop(&mut self) {
-        let _ = self.stop();
-    }
-}
-
-/// mDNS browser for finding sync peers
-struct SyncBrowser {
-    daemon: ServiceDaemon,
-}
-
-impl SyncBrowser {
-    fn new() -> Result<Self> {
-        let daemon = ServiceDaemon::new().map_err(|e| {
-            ConnectoError::Discovery(format!("Failed to create mDNS daemon: {}", e))
-        })?;
-
-        Ok(Self { daemon })
-    }
-
-    async fn find_peers(
-        &self,
-        our_device_name: &str,
-        timeout: Duration,
-        peer_tx: mpsc::Sender<SyncPeer>,
-    ) -> Result<()> {
-        let receiver = self
-            .daemon
-            .browse(SYNC_SERVICE_TYPE)
-            .map_err(|e| ConnectoError::Discovery(format!("Failed to browse: {}", e)))?;
-
-        let our_name = our_device_name.to_string();
-
-        // Run browser in blocking thread
-        let handle = std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + timeout;
-
-            while std::time::Instant::now() < deadline {
-                match receiver.recv_timeout(Duration::from_millis(100)) {
-                    Ok(ServiceEvent::ServiceResolved(info)) => {
-                        let device_name = info.get_fullname().to_string();
-
-                        // Skip our own service
-                        if device_name.contains(&our_name) {
-                            debug!("Skipping our own sync service");
-                            continue;
-                        }
-
-                        let peer = SyncPeer {
-                            device_name,
-                            addresses: info.get_addresses().iter().copied().collect(),
-                            port: info.get_port(),
-                            instance_name: info.get_fullname().to_string(),
-                        };
-
-                        debug!("Found sync peer: {:?}", peer);
-
-                        if peer_tx.blocking_send(peer).is_err() {
-                            // Channel closed, stop browsing
-                            break;
-                        }
-                    }
-                    Ok(ServiceEvent::SearchStopped(_)) => {
-                        break;
-                    }
-                    Err(flume::RecvTimeoutError::Timeout) => {
-                        continue;
-                    }
-                    Err(flume::RecvTimeoutError::Disconnected) => {
-                        break;
-                    }
-                    Ok(_) => {}
-                }
-            }
-        });
-
-        // Wait for the thread to complete
-        tokio::task::spawn_blocking(move || {
-            let _ = handle.join();
-        })
-        .await
-        .map_err(|e| ConnectoError::Discovery(format!("Browser thread failed: {}", e)))?;
-
-        Ok(())
     }
 }
 
@@ -676,39 +501,6 @@ mod tests {
     }
 
     #[test]
-    fn test_sync_peer_primary_address_prefers_ipv4() {
-        let peer = SyncPeer {
-            device_name: "Test".to_string(),
-            addresses: vec![
-                "::1".parse().unwrap(),
-                "192.168.1.100".parse().unwrap(),
-                "fe80::1".parse().unwrap(),
-            ],
-            port: 8099,
-            instance_name: "test".to_string(),
-        };
-
-        let primary = peer.primary_address().unwrap();
-        assert!(primary.is_ipv4());
-        assert_eq!(primary.to_string(), "192.168.1.100");
-    }
-
-    #[test]
-    fn test_sync_peer_connection_string() {
-        let peer = SyncPeer {
-            device_name: "Test".to_string(),
-            addresses: vec!["192.168.1.100".parse().unwrap()],
-            port: 8099,
-            instance_name: "test".to_string(),
-        };
-
-        assert_eq!(
-            peer.connection_string(),
-            Some("192.168.1.100:8099".to_string())
-        );
-    }
-
-    #[test]
     fn test_sync_handler_creation() {
         let temp_dir = TempDir::new().unwrap();
         let ssh_dir = temp_dir.path().join(".ssh");
@@ -723,7 +515,7 @@ mod tests {
     fn test_sync_event_variants() {
         let addr: SocketAddr = "127.0.0.1:8099".parse().unwrap();
 
-        let events = vec![
+        let events = [
             SyncEvent::Started { address: addr },
             SyncEvent::Searching,
             SyncEvent::PeerFound {
@@ -767,8 +559,8 @@ mod tests {
         let key_pair_b = SshKeyPair::generate(KeyAlgorithm::Ed25519, "bob@device-b").unwrap();
 
         // Store the public keys for later verification
-        let key_a_pub = key_pair_a.public_key.clone();
-        let key_b_pub = key_pair_b.public_key.clone();
+        let _key_a_pub = key_pair_a.public_key.clone();
+        let _key_b_pub = key_pair_b.public_key.clone();
 
         let handler_a = SyncHandler::new(key_manager_a, "Device A", key_pair_a);
         let handler_b = SyncHandler::new(key_manager_b, "Device B", key_pair_b);

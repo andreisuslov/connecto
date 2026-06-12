@@ -16,7 +16,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 #[cfg(any(
-    all(feature = "bluetooth"),
+    feature = "bluetooth",
     any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
 use super::warn;
@@ -262,7 +262,10 @@ pub async fn run_with_adhoc(
 
         // Find first IPv4 address to advertise
         if let Some(ip) = addresses.iter().find(|a| a.is_ipv4()) {
-            match handler.start_bluetooth_advertising(&device_name, *ip, port).await {
+            match handler
+                .start_bluetooth_advertising(&device_name, *ip, port)
+                .await
+            {
                 Ok(()) => {
                     success("Bluetooth advertising started");
                     bluetooth_handler = Some(handler);
@@ -435,7 +438,7 @@ mod tests {
 
     #[test]
     fn test_module_compiles() {
-        assert!(true);
+        // Compiling this test is the assertion
     }
 
     #[tokio::test]

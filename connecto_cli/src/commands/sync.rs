@@ -392,6 +392,6 @@ Host another
 
     #[test]
     fn test_module_compiles() {
-        assert!(true);
+        // Compiling this test is the assertion
     }
 }

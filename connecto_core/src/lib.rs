@@ -6,11 +6,16 @@
 //!
 //! # Architecture
 //!
-//! The library is organized into three main modules:
+//! The library is organized into the following modules:
 //!
 //! - [`discovery`]: mDNS-based device discovery using the `mdns-sd` crate
 //! - [`keys`]: SSH key generation, parsing, and management
 //! - [`protocol`]: The handshake protocol for secure key exchange
+//! - [`ssh_config`]: Parsing and editing of connecto-managed `~/.ssh/config` entries
+//! - [`paths`]: Cross-platform home and SSH directory resolution
+//! - [`device_name`]: Sanitization of device names into SSH host aliases
+//! - [`user_config`]: Persistent user configuration (extra subnets, default key)
+//! - [`fsutil`]: Atomic file writes
 //!
 //! # Example
 //!
@@ -48,59 +53,45 @@
 //! }
 //! ```
 
+pub mod device_name;
 pub mod discovery;
 pub mod error;
 pub mod fallback;
+pub mod fsutil;
 pub mod keys;
+pub mod paths;
 pub mod protocol;
+pub mod ssh_config;
 pub mod sync;
+pub mod user_config;
 
 #[cfg(feature = "bluetooth")]
 pub mod bluetooth;
 
 // Re-export commonly used types
+pub use device_name::sanitize_device_name;
 pub use discovery::{
     DiscoveredDevice, DiscoveryEvent, ServiceAdvertiser, ServiceBrowser, SubnetScanner,
     DEFAULT_PORT, SERVICE_TYPE,
 };
 pub use error::{ConnectoError, Result};
-pub use keys::{KeyAlgorithm, KeyManager, SshKeyPair};
+pub use keys::{fingerprint_sha256, KeyAlgorithm, KeyManager, SshKeyPair};
 pub use protocol::{
     HandshakeClient, HandshakeServer, Message, PairingResult, ServerEvent, PROTOCOL_VERSION,
 };
+pub use ssh_config::{AddOutcome, HostEntry, SshConfig, CONNECTO_MARKER};
 pub use sync::{SyncEvent, SyncHandler, SyncResult, DEFAULT_SYNC_TIMEOUT_SECS, SYNC_SERVICE_TYPE};
+pub use user_config::Config;
 
 #[cfg(feature = "bluetooth")]
 pub use bluetooth::{
-    BluetoothAdvertiser, BluetoothBrowser, BluetoothDevice, BluetoothEvent,
-    BLE_CHAR_DEVICE_INFO, BLE_SERVICE_UUID,
+    BluetoothAdvertiser, BluetoothBrowser, BluetoothDevice, BluetoothEvent, BLE_CHAR_DEVICE_INFO,
+    BLE_SERVICE_UUID,
 };
-
-/// Get the version of the connecto_core library
-pub fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
-
-/// Get the hostname of this device
-pub fn hostname() -> String {
-    discovery::get_hostname()
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_version() {
-        let v = version();
-        assert!(!v.is_empty());
-    }
-
-    #[test]
-    fn test_hostname() {
-        let h = hostname();
-        assert!(!h.is_empty());
-    }
 
     #[test]
     fn test_re_exports() {
@@ -111,5 +102,9 @@ mod tests {
         let _ = KeyAlgorithm::default();
         let _ = SYNC_SERVICE_TYPE;
         let _ = DEFAULT_SYNC_TIMEOUT_SECS;
+        let _ = CONNECTO_MARKER;
+        let _ = AddOutcome::Added;
+        let _ = Config::default();
+        let _ = sanitize_device_name("Test Device");
     }
 }

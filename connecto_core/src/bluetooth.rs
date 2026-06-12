@@ -192,9 +192,9 @@ impl BluetoothBrowser {
         use btleplug::api::Manager as _;
         use btleplug::platform::Manager;
 
-        let manager = Manager::new()
-            .await
-            .map_err(|e| ConnectoError::Bluetooth(format!("Failed to create BLE manager: {}", e)))?;
+        let manager = Manager::new().await.map_err(|e| {
+            ConnectoError::Bluetooth(format!("Failed to create BLE manager: {}", e))
+        })?;
 
         let adapters = manager
             .adapters()
@@ -257,8 +257,7 @@ impl BluetoothBrowser {
                         if let CentralEvent::DeviceDiscovered(id) = event {
                             debug!("Discovered BLE device: {:?}", id);
                             if let Ok(peripheral) = self.adapter.peripheral(&id).await {
-                                if let Ok(Some(device)) =
-                                    self.process_peripheral(&peripheral).await
+                                if let Ok(Some(device)) = self.process_peripheral(&peripheral).await
                                 {
                                     let mut devices = discovered.lock().await;
                                     devices.insert(device.ble_address.clone(), device);
@@ -345,12 +344,7 @@ impl BluetoothBrowser {
             match peripheral.read(char).await {
                 Ok(data) => match decode_device_info(&data) {
                     Ok((ip, port, name)) => {
-                        debug!(
-                            "Decoded device info: {} at {}:{}",
-                            name,
-                            ip,
-                            port
-                        );
+                        debug!("Decoded device info: {} at {}:{}", name, ip, port);
                         Some(BluetoothDevice {
                             name: if name.is_empty() {
                                 local_name.unwrap_or_else(|| "Unknown".to_string())
@@ -415,14 +409,13 @@ impl BluetoothAdvertiser {
     /// # Errors
     /// Returns an error if BlueZ is not available or Bluetooth is disabled.
     pub async fn new() -> Result<Self> {
-        let session = bluer::Session::new()
-            .await
-            .map_err(|e| ConnectoError::Bluetooth(format!("Failed to create BlueZ session: {}", e)))?;
+        let session = bluer::Session::new().await.map_err(|e| {
+            ConnectoError::Bluetooth(format!("Failed to create BlueZ session: {}", e))
+        })?;
 
-        let adapter_name = session
-            .default_adapter()
-            .await
-            .map_err(|e| ConnectoError::Bluetooth(format!("Failed to get default adapter: {}", e)))?;
+        let adapter_name = session.default_adapter().await.map_err(|e| {
+            ConnectoError::Bluetooth(format!("Failed to get default adapter: {}", e))
+        })?;
 
         let adapter = session
             .adapter(&adapter_name)
@@ -430,10 +423,9 @@ impl BluetoothAdvertiser {
 
         // Ensure adapter is powered on
         if !adapter.is_powered().await.unwrap_or(false) {
-            adapter
-                .set_powered(true)
-                .await
-                .map_err(|e| ConnectoError::Bluetooth(format!("Failed to power on adapter: {}", e)))?;
+            adapter.set_powered(true).await.map_err(|e| {
+                ConnectoError::Bluetooth(format!("Failed to power on adapter: {}", e))
+            })?;
         }
 
         info!("BlueZ adapter initialized: {}", adapter_name);

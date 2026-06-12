@@ -3,13 +3,13 @@
 use anyhow::Result;
 use colored::Colorize;
 use connecto_core::discovery::{DiscoveredDevice, ServiceBrowser, SubnetScanner, DEFAULT_PORT};
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+use connecto_core::fallback::AdHocNetwork;
 #[cfg(any(
-    all(feature = "bluetooth"),
+    feature = "bluetooth",
     any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
 use connecto_core::fallback::FallbackHandler;
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-use connecto_core::fallback::AdHocNetwork;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
 use std::io::Write;
@@ -251,7 +251,10 @@ pub async fn run_with_options(
                         if let Some(ip) = bt_device.ip_address {
                             let device = DiscoveredDevice {
                                 name: format!("{} (BLE)", bt_device.name),
-                                hostname: format!("{}.ble.local.", bt_device.ble_address.replace(':', "")),
+                                hostname: format!(
+                                    "{}.ble.local.",
+                                    bt_device.ble_address.replace(':', "")
+                                ),
                                 addresses: vec![ip],
                                 port: bt_device.port,
                                 instance_name: format!("{}._connecto._tcp.local.", bt_device.name),

@@ -26,20 +26,11 @@ pub enum ConnectoError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("SSH key error: {0}")]
-    SshKey(String),
-
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
     #[error("Timeout: {0}")]
     Timeout(String),
-
-    #[error("Device not found: {0}")]
-    DeviceNotFound(String),
-
-    #[error("Authorization file error: {0}")]
-    AuthorizedKeys(String),
 
     #[error("Sync error: {0}")]
     Sync(String),

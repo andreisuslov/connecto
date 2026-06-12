@@ -34,7 +34,6 @@ pub fn warn(msg: &str) {
 mod tests {
     #[test]
     fn test_module_exists() {
-        // Just verify the module compiles
-        assert!(true);
+        // Compiling this test is the assertion
     }
 }

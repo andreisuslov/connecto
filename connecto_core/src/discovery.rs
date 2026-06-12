@@ -3,14 +3,14 @@
 //! Handles automatic discovery of Connecto instances on the local network
 
 use crate::error::{ConnectoError, Result};
-use crate::protocol::Message;
+use crate::protocol::{read_message, write_message, Message, PROTOCOL_VERSION};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -60,33 +60,39 @@ pub enum DiscoveryEvent {
 /// Service advertiser for making this device discoverable
 pub struct ServiceAdvertiser {
     daemon: ServiceDaemon,
+    service_type: String,
     service_fullname: Option<String>,
 }
 
 impl ServiceAdvertiser {
-    /// Create a new service advertiser
+    /// Create a new service advertiser for the default pairing service
+    /// ([`SERVICE_TYPE`])
     pub fn new() -> Result<Self> {
+        Self::new_for_service(SERVICE_TYPE)
+    }
+
+    /// Create a new service advertiser for an arbitrary mDNS service type
+    /// (e.g. the sync service)
+    pub fn new_for_service(service_type: &str) -> Result<Self> {
         let daemon = ServiceDaemon::new().map_err(|e| {
             ConnectoError::Discovery(format!("Failed to create mDNS daemon: {}", e))
         })?;
 
         Ok(Self {
             daemon,
+            service_type: service_type.to_string(),
             service_fullname: None,
         })
     }
 
     /// Start advertising this device
     pub fn advertise(&mut self, device_name: &str, port: u16) -> Result<()> {
-        let hostname = hostname::get()
-            .map(|h: std::ffi::OsString| h.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "unknown".to_string());
-
+        let hostname = get_hostname();
         let service_hostname = format!("{}.local.", hostname);
         let instance_name = format!("{} ({})", device_name, hostname);
 
         let service_info = ServiceInfo::new(
-            SERVICE_TYPE,
+            &self.service_type,
             &instance_name,
             &service_hostname,
             "",
@@ -122,50 +128,84 @@ impl ServiceAdvertiser {
 impl Drop for ServiceAdvertiser {
     fn drop(&mut self) {
         let _ = self.stop();
+        // Shut the daemon down so its background threads exit instead of
+        // leaking one daemon per advertiser instance.
+        let _ = self.daemon.shutdown();
     }
 }
 
 /// Service browser for discovering other devices
 pub struct ServiceBrowser {
     daemon: ServiceDaemon,
+    service_type: String,
+    skip_substring: Option<String>,
     devices: Arc<Mutex<HashMap<String, DiscoveredDevice>>>,
 }
 
 impl ServiceBrowser {
-    /// Create a new service browser
+    /// Create a new service browser for the default pairing service
+    /// ([`SERVICE_TYPE`])
     pub fn new() -> Result<Self> {
+        Self::new_for_service(SERVICE_TYPE)
+    }
+
+    /// Create a new service browser for an arbitrary mDNS service type
+    /// (e.g. the sync service)
+    pub fn new_for_service(service_type: &str) -> Result<Self> {
         let daemon = ServiceDaemon::new().map_err(|e| {
             ConnectoError::Discovery(format!("Failed to create mDNS daemon: {}", e))
         })?;
 
         Ok(Self {
             daemon,
+            service_type: service_type.to_string(),
+            skip_substring: None,
             devices: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Skip resolved instances whose mDNS fullname contains `name`
+    ///
+    /// Used by sync to ignore this device's own advertisement while browsing
+    /// for peers.
+    pub fn skip_instances_containing(mut self, name: &str) -> Self {
+        self.skip_substring = Some(name.to_string());
+        self
     }
 
     /// Start browsing for devices
     pub fn browse(&self) -> Result<mpsc::Receiver<DiscoveryEvent>> {
         let receiver = self
             .daemon
-            .browse(SERVICE_TYPE)
+            .browse(&self.service_type)
             .map_err(|e| ConnectoError::Discovery(format!("Failed to browse: {}", e)))?;
 
         let (tx, rx) = mpsc::channel(100);
         let devices = Arc::clone(&self.devices);
+        let skip_substring = self.skip_substring.clone();
 
+        // Bridge thread: forwards mDNS daemon events to the async channel.
+        // It exits when the daemon channel disconnects (daemon shut down on
+        // Drop), when the search stops, or when the event receiver is gone.
         std::thread::spawn(move || {
-            let rt = tokio::runtime::Handle::try_current().ok();
-
             while let Ok(event) = receiver.recv() {
                 match event {
                     ServiceEvent::ServiceResolved(info) => {
+                        let fullname = info.get_fullname().to_string();
+
+                        if let Some(ref skip) = skip_substring {
+                            if fullname.contains(skip) {
+                                debug!("Skipping our own service: {}", fullname);
+                                continue;
+                            }
+                        }
+
                         let device = DiscoveredDevice {
-                            name: info.get_fullname().to_string(),
+                            name: fullname.clone(),
                             hostname: info.get_hostname().to_string(),
                             addresses: info.get_addresses().iter().copied().collect(),
                             port: info.get_port(),
-                            instance_name: info.get_fullname().to_string(),
+                            instance_name: fullname,
                         };
 
                         debug!("Discovered device: {:?}", device);
@@ -175,15 +215,12 @@ impl ServiceBrowser {
                             devs.insert(device.instance_name.clone(), device.clone());
                         }
 
-                        let event = DiscoveryEvent::DeviceFound(device);
-                        if let Some(ref handle) = rt {
-                            let tx = tx.clone();
-                            handle.spawn(async move {
-                                let _ = tx.send(event).await;
-                            });
-                        } else {
-                            // Blocking send if no runtime
-                            let _ = tx.blocking_send(event);
+                        if tx
+                            .blocking_send(DiscoveryEvent::DeviceFound(device))
+                            .is_err()
+                        {
+                            debug!("Discovery event receiver dropped; stopping bridge thread");
+                            break;
                         }
                     }
                     ServiceEvent::ServiceRemoved(_, fullname) => {
@@ -192,19 +229,19 @@ impl ServiceBrowser {
                             devs.remove(&fullname);
                         }
 
-                        let event = DiscoveryEvent::DeviceLost(fullname);
-                        if let Some(ref handle) = rt {
-                            let tx = tx.clone();
-                            handle.spawn(async move {
-                                let _ = tx.send(event).await;
-                            });
-                        } else {
-                            let _ = tx.blocking_send(event);
+                        if tx
+                            .blocking_send(DiscoveryEvent::DeviceLost(fullname))
+                            .is_err()
+                        {
+                            debug!("Discovery event receiver dropped; stopping bridge thread");
+                            break;
                         }
                     }
                     ServiceEvent::SearchStarted(_) => {
                         debug!("mDNS search started");
-                        let _ = tx.blocking_send(DiscoveryEvent::SearchStarted);
+                        if tx.blocking_send(DiscoveryEvent::SearchStarted).is_err() {
+                            break;
+                        }
                     }
                     ServiceEvent::SearchStopped(_) => {
                         debug!("mDNS search stopped");
@@ -253,6 +290,16 @@ impl ServiceBrowser {
         }
 
         Ok(self.get_devices())
+    }
+}
+
+impl Drop for ServiceBrowser {
+    fn drop(&mut self) {
+        // Stop any active browse and shut the daemon down so the bridge
+        // thread's recv() disconnects and the thread exits instead of leaking
+        // one daemon (plus a parked thread) per browser instance.
+        let _ = self.daemon.stop_browse(&self.service_type);
+        let _ = self.daemon.shutdown();
     }
 }
 
@@ -482,27 +529,13 @@ impl SubnetScanner {
 
         // Send Hello message
         let hello = Message::Hello {
-            version: 1,
+            version: PROTOCOL_VERSION,
             device_name: format!("scanner-{}", std::process::id()),
         };
-        writer
-            .write_all(hello.to_json()?.as_bytes())
-            .await
-            .map_err(|e| ConnectoError::Network(e.to_string()))?;
-        writer
-            .write_all(b"\n")
-            .await
-            .map_err(|e| ConnectoError::Network(e.to_string()))?;
+        write_message(&mut writer, &hello).await?;
 
-        // Read HelloAck response
-        let mut line = String::new();
-        tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut line))
-            .await
-            .map_err(|_| ConnectoError::Timeout("Timed out waiting for response".to_string()))?
-            .map_err(|e| ConnectoError::Network(e.to_string()))?;
-
-        let response: Message = serde_json::from_str(&line)
-            .map_err(|e| ConnectoError::Protocol(format!("Invalid response: {}", e)))?;
+        // Read HelloAck response (short timeout - this is just a probe)
+        let response = read_message(&mut reader, Duration::from_secs(2)).await?;
 
         match response {
             Message::HelloAck { device_name, .. } => Ok(DiscoveredDevice {

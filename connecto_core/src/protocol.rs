@@ -8,13 +8,69 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
+};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 /// Protocol version for compatibility checking
 pub const PROTOCOL_VERSION: u32 = 1;
+
+/// Maximum length in bytes of a single newline-delimited protocol message
+pub(crate) const MAX_MESSAGE_LEN: u64 = 64 * 1024;
+
+/// Read timeout applied to handshake and sync protocol messages
+pub(crate) const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Write a [`Message`] as newline-delimited JSON and flush the writer
+pub(crate) async fn write_message<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    msg: &Message,
+) -> Result<()> {
+    writer.write_all(msg.to_json()?.as_bytes()).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+/// Read a single newline-delimited [`Message`] from the reader
+///
+/// The read is bounded both in time (`timeout`, mapped to
+/// [`ConnectoError::Timeout`]) and in size ([`MAX_MESSAGE_LEN`], mapped to
+/// [`ConnectoError::Protocol`]) so a misbehaving peer can neither park the
+/// connection forever nor make us buffer an unbounded line. EOF before a
+/// complete message maps to [`ConnectoError::Network`].
+pub(crate) async fn read_message<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    timeout: Duration,
+) -> Result<Message> {
+    let mut line = String::new();
+    let bytes_read = tokio::time::timeout(timeout, async {
+        // Cap how much a single read_line may buffer; the +1 lets a line of
+        // exactly MAX_MESSAGE_LEN bytes (including the newline) through while
+        // still detecting longer ones.
+        let mut limited = reader.take(MAX_MESSAGE_LEN + 1);
+        limited.read_line(&mut line).await
+    })
+    .await
+    .map_err(|_| ConnectoError::Timeout("Timed out waiting for message".to_string()))?
+    .map_err(|e| ConnectoError::Network(format!("Failed to read message: {}", e)))?;
+
+    if bytes_read == 0 {
+        return Err(ConnectoError::Network(
+            "Connection closed by peer".to_string(),
+        ));
+    }
+    if bytes_read as u64 > MAX_MESSAGE_LEN {
+        return Err(ConnectoError::Protocol(format!(
+            "Message exceeds maximum length of {} bytes",
+            MAX_MESSAGE_LEN
+        )));
+    }
+
+    Message::from_json(&line)
+}
 
 /// Message types in the handshake protocol
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -245,12 +301,9 @@ async fn handle_client(
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
-    let mut line = String::new();
 
     // Read Hello message
-    line.clear();
-    reader.read_line(&mut line).await?;
-    let hello = Message::from_json(&line)?;
+    let hello = read_message(&mut reader, HANDSHAKE_READ_TIMEOUT).await?;
 
     let client_name = match hello {
         Message::Hello {
@@ -265,7 +318,7 @@ async fn handle_client(
                         PROTOCOL_VERSION, version
                     ),
                 };
-                writer.write_all(error_msg.to_json()?.as_bytes()).await?;
+                write_message(&mut writer, &error_msg).await?;
                 return Err(ConnectoError::Handshake(
                     "Protocol version mismatch".to_string(),
                 ));
@@ -277,7 +330,7 @@ async fn handle_client(
                 code: 2,
                 message: "Expected Hello message".to_string(),
             };
-            writer.write_all(error_msg.to_json()?.as_bytes()).await?;
+            write_message(&mut writer, &error_msg).await?;
             return Err(ConnectoError::Handshake("Expected Hello".to_string()));
         }
     };
@@ -302,32 +355,11 @@ async fn handle_client(
         device_name: device_name.clone(),
         verification_code: verification_code.clone(),
     };
-    writer.write_all(hello_ack.to_json()?.as_bytes()).await?;
+    write_message(&mut writer, &hello_ack).await?;
 
-    // Read KeyExchange with timeout (handles scanner probes that disconnect after HelloAck)
-    line.clear();
-    let read_result =
-        tokio::time::timeout(Duration::from_secs(30), reader.read_line(&mut line)).await;
-
-    match read_result {
-        Ok(Ok(0)) | Err(_) => {
-            // EOF (client disconnected) or timeout - likely a scanner probe
-            return Err(ConnectoError::Handshake(
-                "Client disconnected before sending key (possibly a scanner probe)".to_string(),
-            ));
-        }
-        Ok(Err(e)) => {
-            return Err(ConnectoError::Network(format!(
-                "Failed to read KeyExchange: {}",
-                e
-            )));
-        }
-        Ok(Ok(_)) => {
-            // Successfully read data, continue
-        }
-    }
-
-    let key_exchange = Message::from_json(&line)?;
+    // Read KeyExchange. The timeout/EOF handling inside read_message covers
+    // scanner probes that disconnect (or go silent) after HelloAck.
+    let key_exchange = read_message(&mut reader, HANDSHAKE_READ_TIMEOUT).await?;
 
     match key_exchange {
         Message::KeyExchange {
@@ -349,7 +381,7 @@ async fn handle_client(
             let accepted = Message::KeyAccepted {
                 message: "Key added to authorized_keys".to_string(),
             };
-            writer.write_all(accepted.to_json()?.as_bytes()).await?;
+            write_message(&mut writer, &accepted).await?;
 
             // Get current user (USER on Unix, USERNAME on Windows)
             let ssh_user = std::env::var("USER")
@@ -358,7 +390,7 @@ async fn handle_client(
 
             // Send PairingComplete
             let complete = Message::PairingComplete { ssh_user };
-            writer.write_all(complete.to_json()?.as_bytes()).await?;
+            write_message(&mut writer, &complete).await?;
 
             let _ = event_tx
                 .send(ServerEvent::PairingComplete {
@@ -373,7 +405,7 @@ async fn handle_client(
                 code: 3,
                 message: "Expected KeyExchange message".to_string(),
             };
-            writer.write_all(error_msg.to_json()?.as_bytes()).await?;
+            write_message(&mut writer, &error_msg).await?;
             Err(ConnectoError::Handshake("Expected KeyExchange".to_string()))
         }
     }
@@ -400,19 +432,16 @@ impl HandshakeClient {
 
         let (reader, mut writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
-        let mut line = String::new();
 
         // Send Hello
         let hello = Message::Hello {
             version: PROTOCOL_VERSION,
             device_name: self.device_name.clone(),
         };
-        writer.write_all(hello.to_json()?.as_bytes()).await?;
+        write_message(&mut writer, &hello).await?;
 
         // Read HelloAck
-        line.clear();
-        reader.read_line(&mut line).await?;
-        let hello_ack = Message::from_json(&line)?;
+        let hello_ack = read_message(&mut reader, HANDSHAKE_READ_TIMEOUT).await?;
 
         let (server_name, verification_code) = match hello_ack {
             Message::HelloAck {
@@ -440,12 +469,10 @@ impl HandshakeClient {
             public_key: key_pair.public_key.clone(),
             comment: key_pair.comment.clone(),
         };
-        writer.write_all(key_exchange.to_json()?.as_bytes()).await?;
+        write_message(&mut writer, &key_exchange).await?;
 
         // Read KeyAccepted
-        line.clear();
-        reader.read_line(&mut line).await?;
-        let accepted = Message::from_json(&line)?;
+        let accepted = read_message(&mut reader, HANDSHAKE_READ_TIMEOUT).await?;
 
         match accepted {
             Message::KeyAccepted { .. } => {}
@@ -458,9 +485,7 @@ impl HandshakeClient {
         }
 
         // Read PairingComplete
-        line.clear();
-        reader.read_line(&mut line).await?;
-        let complete = Message::from_json(&line)?;
+        let complete = read_message(&mut reader, HANDSHAKE_READ_TIMEOUT).await?;
 
         match complete {
             Message::PairingComplete { ssh_user } => Ok(PairingResult {
@@ -716,6 +741,76 @@ mod tests {
             events.push(event);
         }
         assert!(!events.is_empty());
+    }
+
+    // Framing helper tests
+
+    #[tokio::test]
+    async fn test_write_read_message_roundtrip() {
+        let (client, mut server) = tokio::io::duplex(1024);
+
+        let msg = Message::Hello {
+            version: PROTOCOL_VERSION,
+            device_name: "Round Trip".to_string(),
+        };
+        write_message(&mut server, &msg).await.unwrap();
+
+        let mut reader = BufReader::new(client);
+        let received = read_message(&mut reader, Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        match received {
+            Message::Hello {
+                version,
+                device_name,
+            } => {
+                assert_eq!(version, PROTOCOL_VERSION);
+                assert_eq!(device_name, "Round Trip");
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_message_timeout() {
+        // The server side never sends anything, so the read must time out.
+        let (client, _server) = tokio::io::duplex(64);
+        let mut reader = BufReader::new(client);
+
+        let result = read_message(&mut reader, Duration::from_millis(100)).await;
+        assert!(matches!(result, Err(ConnectoError::Timeout(_))));
+    }
+
+    #[tokio::test]
+    async fn test_read_message_rejects_oversized_line() {
+        let (client, mut server) = tokio::io::duplex(1024);
+
+        // Write the oversized line from a task; the duplex buffer is small so
+        // the writer blocks until the reader consumes (or gives up).
+        let writer = tokio::spawn(async move {
+            let oversized = vec![b'a'; MAX_MESSAGE_LEN as usize + 100];
+            let _ = server.write_all(&oversized).await;
+            let _ = server.write_all(b"\n").await;
+        });
+
+        let mut reader = BufReader::new(client);
+        let result = read_message(&mut reader, Duration::from_secs(5)).await;
+        assert!(matches!(result, Err(ConnectoError::Protocol(_))));
+
+        // Unblock the writer task by closing the read side before joining it.
+        drop(reader);
+        let _ = writer.await;
+    }
+
+    #[tokio::test]
+    async fn test_read_message_eof() {
+        let (client, server) = tokio::io::duplex(64);
+        drop(server);
+
+        let mut reader = BufReader::new(client);
+        let result = read_message(&mut reader, Duration::from_secs(1)).await;
+        assert!(matches!(result, Err(ConnectoError::Network(_))));
     }
 
     // Sync protocol message tests
