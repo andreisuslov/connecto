@@ -3,12 +3,26 @@
 //! Provides alternative connection methods when standard network discovery fails:
 //! - Ad-hoc WiFi network creation and joining
 //! - Bluetooth Low Energy discovery (scanning on all platforms, advertising on Linux)
+//!
+//! The cross-platform [`AdHocNetwork`] owns the lifecycle: previous-network
+//! tracking, static-IP bookkeeping, restore-on-failure, and restore-on-drop.
+//! The actual system commands live in per-OS backends in the `macos`, `linux`,
+//! and `windows` submodules, which contain only command primitives
+//! (create/join/restore/current-state) behind the private [`AdHocBackend`]
+//! trait. All backend commands are blocking; async callers must go through
+//! `spawn_blocking` (as [`FallbackHandler::establish_fallback_connection`]
+//! does), which also keeps the restore-on-drop backstop usable from `Drop`.
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "windows")]
+mod windows;
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use crate::error::ConnectoError;
 use crate::error::Result;
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-use std::process::Command;
 use std::time::Duration;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use tracing::{debug, info, warn};
@@ -19,955 +33,155 @@ pub const ADHOC_NETWORK_PREFIX: &str = "Connecto-";
 /// Default channel for ad-hoc network
 pub const ADHOC_CHANNEL: u32 = 11;
 
-/// Ad-hoc network manager for macOS
-#[cfg(target_os = "macos")]
+/// IP address the hosting side pins on the ad-hoc rendezvous subnet
+pub const ADHOC_HOST_IP: &str = "192.168.73.1";
+
+/// IP address the joining side pins on the ad-hoc rendezvous subnet
+pub const ADHOC_CLIENT_IP: &str = "192.168.73.2";
+
+/// Netmask of the ad-hoc rendezvous subnet
+pub const ADHOC_NETMASK: &str = "255.255.255.0";
+
+/// CIDR prefix length of the ad-hoc rendezvous subnet
+pub const ADHOC_PREFIX_LEN: u8 = 24;
+
+/// Result of a successful backend create/join primitive
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+#[derive(Debug, Default)]
+struct AdHocOutcome {
+    /// A static IP was pinned on a system interface and must be undone
+    /// (reset to DHCP / removed) during restore
+    static_ip_configured: bool,
+    /// Non-fatal problem the user should be told about (e.g. joined the
+    /// network but could not configure the rendezvous IP)
+    warning: Option<String>,
+}
+
+/// Per-OS command primitives driven by the shared [`AdHocNetwork`] lifecycle
+///
+/// Implementations live in the platform submodules; tests inject a mock.
+/// `restore` must be idempotent and safe to call even when nothing was
+/// disturbed (it is invoked on every failure path).
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+trait AdHocBackend: Send {
+    /// Best-effort SSID of the currently associated network
+    ///
+    /// Returns `Ok(None)` when not associated or when the name cannot be
+    /// determined (e.g. macOS redacts it without location permission).
+    fn current_network(&mut self) -> Result<Option<String>>;
+
+    /// Create and host the ad-hoc network
+    fn create_network(&mut self, ssid: &str) -> Result<AdHocOutcome>;
+
+    /// Join an existing ad-hoc network
+    fn join_network(&mut self, ssid: &str) -> Result<AdHocOutcome>;
+
+    /// Tear down anything created/joined, rejoin `previous_network` when
+    /// known, and undo static IP configuration when `static_ip_configured`
+    fn restore(&mut self, previous_network: Option<&str>, static_ip_configured: bool)
+        -> Result<()>;
+}
+
+/// Sanitize a device name into the SSID suffix
+///
+/// Reuses the crate-wide device-name policy ([`crate::sanitize_device_name`])
+/// and caps the suffix at 20 characters so the full SSID stays well within
+/// the 32-byte SSID limit.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn sanitize_ssid_component(device_name: &str) -> String {
+    let mut sanitized = crate::device_name::sanitize_device_name(device_name);
+    sanitized.truncate(20);
+    while sanitized.ends_with('-') {
+        sanitized.pop();
+    }
+    sanitized
+}
+
+/// Generate the default hosted-network password (Windows requires 8+ chars)
+#[cfg(any(target_os = "windows", test))]
+fn generate_password(sanitized_name: &str) -> String {
+    format!(
+        "connecto{}",
+        sanitized_name.chars().take(4).collect::<String>()
+    )
+}
+
+/// Parse a macOS product version like `"14.4.1"` into `(major, minor)`
+#[cfg(any(target_os = "macos", test))]
+fn parse_macos_version(version: &str) -> Option<(u32, u32)> {
+    let mut parts = version.trim().split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = match parts.next() {
+        Some(minor) => minor.parse().ok()?,
+        None => 0,
+    };
+    Some((major, minor))
+}
+
+/// Whether this macOS version no longer supports command-line IBSS creation
+///
+/// Apple turned the private `airport` utility into a no-op stub in macOS
+/// 14.4: it exits 0 for any arguments without creating anything, so ad-hoc
+/// creation must fail fast instead of falsely reporting success.
+/// Unparseable versions are conservatively treated as modern.
+#[cfg(any(target_os = "macos", test))]
+fn macos_ibss_unsupported(version: &str) -> bool {
+    match parse_macos_version(version) {
+        Some((major, minor)) => (major, minor) >= (14, 4),
+        None => true,
+    }
+}
+
+/// Cross-platform ad-hoc WiFi network manager
+///
+/// Tracks the pre-existing network state before any mutation and guarantees
+/// restoration on explicit [`cleanup`](Self::cleanup), on create/join
+/// failure, and on drop.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 pub struct AdHocNetwork {
     network_name: String,
     is_hosting: bool,
+    joined: bool,
     previous_network: Option<String>,
-}
-
-#[cfg(target_os = "macos")]
-impl AdHocNetwork {
-    /// Create a new ad-hoc network manager
-    pub fn new(device_name: &str) -> Self {
-        // Sanitize device name for network SSID
-        let sanitized: String = device_name
-            .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-            .take(20)
-            .collect();
-
-        let network_name = format!("{}{}", ADHOC_NETWORK_PREFIX, sanitized);
-
-        Self {
-            network_name,
-            is_hosting: false,
-            previous_network: None,
-        }
-    }
-
-    /// Get the network name
-    pub fn network_name(&self) -> &str {
-        &self.network_name
-    }
-
-    /// Save the current WiFi network so we can rejoin later
-    fn save_current_network(&mut self) -> Result<()> {
-        let output = Command::new("networksetup")
-            .args(["-getairportnetwork", "en0"])
-            .output()
-            .map_err(|e| ConnectoError::Network(format!("Failed to get current network: {}", e)))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // Output format: "Current Wi-Fi Network: NetworkName"
-        if let Some(name) = stdout.strip_prefix("Current Wi-Fi Network: ") {
-            self.previous_network = Some(name.trim().to_string());
-            debug!("Saved current network: {:?}", self.previous_network);
-        }
-
-        Ok(())
-    }
-
-    /// Create and host an ad-hoc network
-    pub fn create_network(&mut self) -> Result<String> {
-        info!("Creating ad-hoc network: {}", self.network_name);
-
-        // Save current network first
-        let _ = self.save_current_network();
-
-        // Create the ad-hoc network using networksetup
-        // On macOS, we use the "ibss" (ad-hoc) mode
-        let _output = Command::new("networksetup")
-            .args(["-createnetworkservice", &self.network_name, "en0"])
-            .output();
-
-        // The actual ad-hoc creation on macOS requires using airport command or CoreWLAN
-        // Let's use the airport utility
-        let airport_path = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport";
-
-        // First, disassociate from current network
-        let _ = Command::new(airport_path).args(["-z"]).output();
-
-        // Create IBSS (ad-hoc) network
-        // Note: Modern macOS has limited support for this, so we'll try multiple approaches
-        let result = Command::new(airport_path)
-            .args(["--ibss", &self.network_name, &ADHOC_CHANNEL.to_string()])
-            .output();
-
-        match result {
-            Ok(output) if output.status.success() => {
-                self.is_hosting = true;
-                info!(
-                    "Ad-hoc network '{}' created successfully",
-                    self.network_name
-                );
-
-                // Configure a static IP for the ad-hoc network
-                let _ = self.configure_adhoc_ip("192.168.73.1");
-
-                Ok(self.network_name.clone())
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                // Try alternative method using networksetup
-                warn!("airport ibss failed: {}, trying alternative method", stderr);
-                self.create_network_alternative()
-            }
-            Err(e) => {
-                warn!("Failed to run airport command: {}, trying alternative", e);
-                self.create_network_alternative()
-            }
-        }
-    }
-
-    /// Alternative method to create ad-hoc network using WiFi menu bar automation
-    fn create_network_alternative(&mut self) -> Result<String> {
-        info!("Trying WiFi menu bar automation to create ad-hoc network");
-
-        // AppleScript to automate creating a network via the WiFi menu bar icon
-        // This works on macOS Monterey, Ventura, Sonoma, and Sequoia
-        let script = format!(
-            r#"
-            use framework "CoreWLAN"
-            use scripting additions
-
-            -- First try CoreWLAN directly (requires no UI)
-            try
-                set wifiClient to current application's CWWiFiClient's sharedWiFiClient()
-                set wifiInterface to wifiClient's interface()
-                if wifiInterface is not missing value then
-                    set ssidData to (current application's NSString's stringWithString:"{network_name}")'s dataUsingEncoding:(current application's NSUTF8StringEncoding)
-                    set createResult to wifiInterface's startIBSSModeWithSSID:ssidData security:(current application's kCWIBSSModeSecurityNone) channel:{channel} password:(missing value) |error|:(missing value)
-                    if createResult then
-                        return "success:corewlan"
-                    end if
-                end if
-            end try
-
-            -- Fallback to UI automation via WiFi menu bar
-            tell application "System Events"
-                -- Check if WiFi menu extra exists
-                tell process "ControlCenter"
-                    set menuExtras to menu bar 1's menu bar items
-                    repeat with menuItem in menuExtras
-                        try
-                            if description of menuItem contains "Wi-Fi" or name of menuItem contains "Wi-Fi" then
-                                click menuItem
-                                delay 0.5
-
-                                -- Look for "Create Network..." or equivalent
-                                set foundCreateOption to false
-                                repeat with uiItem in (entire contents of window 1)
-                                    try
-                                        if (class of uiItem is button or class of uiItem is static text) then
-                                            set itemName to name of uiItem
-                                            if itemName contains "Create Network" or itemName contains "Other Networks" then
-                                                click uiItem
-                                                set foundCreateOption to true
-                                                exit repeat
-                                            end if
-                                        end if
-                                    end try
-                                end repeat
-
-                                if not foundCreateOption then
-                                    -- Try Wi-Fi Settings path
-                                    repeat with uiItem in (entire contents of window 1)
-                                        try
-                                            if name of uiItem contains "Wi-Fi Settings" or name of uiItem contains "Network Preferences" then
-                                                click uiItem
-                                                delay 1
-                                                exit repeat
-                                            end if
-                                        end try
-                                    end repeat
-                                end if
-
-                                exit repeat
-                            end if
-                        end try
-                    end repeat
-                end tell
-            end tell
-
-            -- If we got here via UI, try to complete the Create Network dialog
-            delay 0.5
-            tell application "System Events"
-                -- Handle the Create Network dialog if it appeared
-                set allWindows to windows of (processes whose frontmost is true)
-                repeat with proc in (processes whose frontmost is true)
-                    repeat with win in windows of proc
-                        try
-                            set winName to name of win
-                            if winName contains "Create" or winName contains "Network" then
-                                -- Find and fill the network name field
-                                set textFields to text fields of win
-                                if (count of textFields) > 0 then
-                                    set value of (item 1 of textFields) to "{network_name}"
-                                    delay 0.3
-                                    -- Click Create button
-                                    repeat with btn in buttons of win
-                                        if name of btn is "Create" then
-                                            click btn
-                                            return "success:ui"
-                                        end if
-                                    end repeat
-                                end if
-                            end if
-                        end try
-                    end repeat
-                end repeat
-            end tell
-
-            return "fallback:manual"
-            "#,
-            network_name = self.network_name,
-            channel = ADHOC_CHANNEL
-        );
-
-        let result = Command::new("osascript")
-            .args(["-e", &script])
-            .output()
-            .map_err(|e| {
-                ConnectoError::Network(format!("Failed to run AppleScript automation: {}", e))
-            })?;
-
-        let stdout = String::from_utf8_lossy(&result.stdout).trim().to_string();
-        let stderr = String::from_utf8_lossy(&result.stderr);
-
-        debug!("AppleScript result: stdout={}, stderr={}", stdout, stderr);
-
-        if stdout.starts_with("success:") {
-            self.is_hosting = true;
-            info!(
-                "Ad-hoc network '{}' created via {}",
-                self.network_name,
-                stdout.strip_prefix("success:").unwrap_or("automation")
-            );
-
-            // Configure static IP for the ad-hoc network
-            let _ = self.configure_adhoc_ip("192.168.73.1");
-
-            return Ok(self.network_name.clone());
-        }
-
-        // If automation didn't fully succeed, try one more approach: direct networksetup
-        // On some macOS versions, we can create a network service and configure it
-        if self.try_networksetup_adhoc() {
-            self.is_hosting = true;
-            info!(
-                "Ad-hoc network '{}' created via networksetup",
-                self.network_name
-            );
-            let _ = self.configure_adhoc_ip("192.168.73.1");
-            return Ok(self.network_name.clone());
-        }
-
-        // Last resort: provide manual instructions
-        Err(ConnectoError::Network(format!(
-            "Automatic ad-hoc network creation failed. \
-             Please create manually:\n\
-             1. Hold Option + click WiFi icon in menu bar\n\
-             2. Select 'Create Network...'\n\
-             3. Network Name: {}\n\
-             4. Channel: {}\n\
-             5. Security: None\n\
-             6. Click 'Create'",
-            self.network_name, ADHOC_CHANNEL
-        )))
-    }
-
-    /// Try to create ad-hoc network using networksetup commands
-    fn try_networksetup_adhoc(&self) -> bool {
-        // Get the WiFi interface name
-        let interface = self
-            .get_wifi_interface()
-            .unwrap_or_else(|| "en0".to_string());
-
-        // Try using wdutil (available on newer macOS)
-        if let Ok(output) = Command::new("wdutil").args(["info"]).output() {
-            if output.status.success() {
-                debug!("wdutil available, WiFi interface: {}", interface);
-            }
-        }
-
-        // Attempt to create via airport with different syntax variations
-        let airport_path = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport";
-        let channel_str = ADHOC_CHANNEL.to_string();
-
-        // Try legacy syntax variations
-        let attempts: [&[&str]; 3] = [
-            &["-i", &interface, "--ibss", &self.network_name, &channel_str],
-            &[
-                "--ibss",
-                &self.network_name,
-                &channel_str,
-                "-c",
-                &channel_str,
-            ],
-            &["-I", &interface, "sniff", &channel_str], // This won't create IBSS but tests airport
-        ];
-
-        for args in attempts.iter() {
-            if let Ok(output) = Command::new(airport_path).args(*args).output() {
-                if output.status.success() {
-                    debug!("airport command succeeded with args: {:?}", args);
-                    return true;
-                }
-            }
-        }
-
-        false
-    }
-
-    /// Get the WiFi interface name (usually en0 but can vary)
-    fn get_wifi_interface(&self) -> Option<String> {
-        let output = Command::new("networksetup")
-            .args(["-listallhardwareports"])
-            .output()
-            .ok()?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut found_wifi = false;
-
-        for line in stdout.lines() {
-            if line.contains("Wi-Fi") {
-                found_wifi = true;
-            } else if found_wifi && line.starts_with("Device:") {
-                return Some(line.replace("Device:", "").trim().to_string());
-            }
-        }
-
-        None
-    }
-
-    /// Configure IP address for ad-hoc network
-    fn configure_adhoc_ip(&self, ip: &str) -> Result<()> {
-        let output = Command::new("networksetup")
-            .args(["-setmanual", "Wi-Fi", ip, "255.255.255.0", "192.168.73.1"])
-            .output()
-            .map_err(|e| ConnectoError::Network(format!("Failed to configure IP: {}", e)))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!("Failed to set IP: {}", stderr);
-        }
-
-        Ok(())
-    }
-
-    /// Scan for connecto ad-hoc networks using system_profiler (works on modern macOS)
-    pub fn scan_for_networks() -> Result<Vec<String>> {
-        // Use system_profiler which works on all macOS versions
-        let output = Command::new("system_profiler")
-            .args(["SPAirPortDataType", "-json"])
-            .output()
-            .map_err(|e| ConnectoError::Network(format!("Failed to scan networks: {}", e)))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        // Parse JSON to find networks starting with our prefix
-        let mut networks = Vec::new();
-
-        // Simple string search for network names (avoiding full JSON parsing dependency)
-        for line in stdout.lines() {
-            let trimmed = line.trim();
-            if trimmed.contains(ADHOC_NETWORK_PREFIX) {
-                // Extract the network name from JSON-like format
-                if let Some(start) = trimmed.find(ADHOC_NETWORK_PREFIX) {
-                    let rest = &trimmed[start..];
-                    // Find end of network name (quote or comma)
-                    let end = rest.find(['"', ',', ':']).unwrap_or(rest.len());
-                    let network_name = rest[..end].trim().to_string();
-                    if !network_name.is_empty() && !networks.contains(&network_name) {
-                        networks.push(network_name);
-                    }
-                }
-            }
-        }
-
-        // Also try networksetup to list available networks
-        if networks.is_empty() {
-            if let Ok(output) = Command::new("networksetup")
-                .args(["-listallhardwareports"])
-                .output()
-            {
-                // Get WiFi interface name (for future use)
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let mut _wifi_device = "en0".to_string();
-                let mut found_wifi = false;
-                for line in stdout.lines() {
-                    if line.contains("Wi-Fi") {
-                        found_wifi = true;
-                    } else if found_wifi && line.starts_with("Device:") {
-                        _wifi_device = line.replace("Device:", "").trim().to_string();
-                        break;
-                    }
-                }
-
-                // Scan using CoreWLAN via defaults (hacky but works)
-                if let Ok(scan_output) = Command::new("defaults")
-                    .args([
-                        "read",
-                        "/Library/Preferences/SystemConfiguration/com.apple.airport.preferences",
-                        "KnownNetworks",
-                    ])
-                    .output()
-                {
-                    let scan_stdout = String::from_utf8_lossy(&scan_output.stdout);
-                    for line in scan_stdout.lines() {
-                        if line.contains(ADHOC_NETWORK_PREFIX) {
-                            let trimmed = line.trim().trim_matches(|c| {
-                                c == '"' || c == ';' || c == '=' || c == '{' || c == '}'
-                            });
-                            if trimmed.starts_with(ADHOC_NETWORK_PREFIX)
-                                && !networks.contains(&trimmed.to_string())
-                            {
-                                networks.push(trimmed.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        debug!("Found {} connecto ad-hoc networks", networks.len());
-        Ok(networks)
-    }
-
-    /// Join an existing connecto ad-hoc network
-    pub fn join_network(&mut self, network_name: &str) -> Result<()> {
-        info!("Joining ad-hoc network: {}", network_name);
-
-        // Save current network first
-        let _ = self.save_current_network();
-
-        let output = Command::new("networksetup")
-            .args(["-setairportnetwork", "en0", network_name])
-            .output()
-            .map_err(|e| ConnectoError::Network(format!("Failed to join network: {}", e)))?;
-
-        if output.status.success() {
-            self.network_name = network_name.to_string();
-
-            // Configure IP for client (different from host)
-            let _ = self.configure_adhoc_ip("192.168.73.2");
-
-            info!("Successfully joined network: {}", network_name);
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(ConnectoError::Network(format!(
-                "Failed to join network: {}",
-                stderr
-            )))
-        }
-    }
-
-    /// Restore previous network connection
-    pub fn restore_previous_network(&mut self) -> Result<()> {
-        if let Some(ref network) = self.previous_network {
-            info!("Restoring previous network: {}", network);
-
-            let output = Command::new("networksetup")
-                .args(["-setairportnetwork", "en0", network])
-                .output()
-                .map_err(|e| ConnectoError::Network(format!("Failed to restore network: {}", e)))?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                warn!("Failed to restore network: {}", stderr);
-            }
-
-            // Reset to DHCP
-            let _ = Command::new("networksetup")
-                .args(["-setdhcp", "Wi-Fi"])
-                .output();
-        }
-
-        self.is_hosting = false;
-        Ok(())
-    }
-
-    /// Check if we're currently hosting an ad-hoc network
-    pub fn is_hosting(&self) -> bool {
-        self.is_hosting
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl Drop for AdHocNetwork {
-    fn drop(&mut self) {
-        if self.is_hosting {
-            let _ = self.restore_previous_network();
-        }
-    }
-}
-
-// ============================================================================
-// Linux Implementation
-// ============================================================================
-
-/// Ad-hoc network manager for Linux (using nmcli/NetworkManager or iw as fallback)
-#[cfg(target_os = "linux")]
-pub struct AdHocNetwork {
-    network_name: String,
-    is_hosting: bool,
-    previous_network: Option<String>,
-    connection_uuid: Option<String>,
-    interface: Option<String>,
-}
-
-#[cfg(target_os = "linux")]
-impl AdHocNetwork {
-    /// Create a new ad-hoc network manager
-    pub fn new(device_name: &str) -> Self {
-        // Sanitize device name for network SSID (same as macOS)
-        let sanitized: String = device_name
-            .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-            .take(20)
-            .collect();
-
-        let network_name = format!("{}{}", ADHOC_NETWORK_PREFIX, sanitized);
-
-        Self {
-            network_name,
-            is_hosting: false,
-            previous_network: None,
-            connection_uuid: None,
-            interface: None,
-        }
-    }
-
-    /// Get the network name
-    pub fn network_name(&self) -> &str {
-        &self.network_name
-    }
-
-    /// Get the WiFi interface name
-    fn get_wifi_interface(&self) -> Option<String> {
-        // Try nmcli first
-        if let Ok(output) = Command::new("nmcli")
-            .args(["-t", "-f", "DEVICE,TYPE", "device", "status"])
-            .output()
-        {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                let parts: Vec<&str> = line.split(':').collect();
-                if parts.len() >= 2 && parts[1] == "wifi" {
-                    return Some(parts[0].to_string());
-                }
-            }
-        }
-
-        // Fallback to iw
-        if let Ok(output) = Command::new("iw").args(["dev"]).output() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                let trimmed = line.trim();
-                if trimmed.starts_with("Interface ") {
-                    return Some(trimmed.replace("Interface ", "").to_string());
-                }
-            }
-        }
-
-        None
-    }
-
-    /// Save the current WiFi network so we can rejoin later
-    fn save_current_network(&mut self) -> Result<()> {
-        let output = Command::new("nmcli")
-            .args(["-t", "-f", "NAME,DEVICE", "connection", "show", "--active"])
-            .output()
-            .map_err(|e| ConnectoError::Network(format!("Failed to get current network: {}", e)))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let interface = self
-            .interface
-            .clone()
-            .unwrap_or_else(|| "wlan0".to_string());
-
-        // Parse output format: "NetworkName:wlan0"
-        for line in stdout.lines() {
-            if line.contains(&interface) {
-                if let Some(name) = line.split(':').next() {
-                    self.previous_network = Some(name.to_string());
-                    debug!("Saved current network: {:?}", self.previous_network);
-                    break;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Create and host an ad-hoc network
-    pub fn create_network(&mut self) -> Result<String> {
-        info!("Creating ad-hoc network: {}", self.network_name);
-
-        // Get WiFi interface
-        let interface = self.get_wifi_interface().ok_or_else(|| {
-            ConnectoError::Network(
-                "No WiFi interface found. Install NetworkManager: sudo apt install network-manager"
-                    .to_string(),
-            )
-        })?;
-        self.interface = Some(interface.clone());
-
-        // Save current network first
-        let _ = self.save_current_network();
-
-        // Try nmcli first (requires NetworkManager)
-        match self.create_network_nmcli(&interface) {
-            Ok(uuid) => {
-                self.connection_uuid = Some(uuid);
-                self.is_hosting = true;
-                info!(
-                    "Ad-hoc network '{}' created successfully via nmcli",
-                    self.network_name
-                );
-                return Ok(self.network_name.clone());
-            }
-            Err(e) => {
-                warn!("nmcli failed: {}, trying iw fallback", e);
-            }
-        }
-
-        // Fallback to iw (requires root)
-        match self.create_network_iw(&interface) {
-            Ok(()) => {
-                self.is_hosting = true;
-                info!(
-                    "Ad-hoc network '{}' created successfully via iw",
-                    self.network_name
-                );
-                Ok(self.network_name.clone())
-            }
-            Err(e) => Err(ConnectoError::Network(format!(
-                "Failed to create ad-hoc network: {}. \
-                 \nTry running with sudo, or add yourself to the 'netdev' group:\n  \
-                 sudo usermod -aG netdev $USER\n  \
-                 (then log out and back in)",
-                e
-            ))),
-        }
-    }
-
-    /// Create ad-hoc network using nmcli (NetworkManager)
-    fn create_network_nmcli(&self, interface: &str) -> Result<String> {
-        // Delete any existing connection with this name
-        let _ = Command::new("nmcli")
-            .args(["connection", "delete", &self.network_name])
-            .output();
-
-        // Create ad-hoc connection
-        let output = Command::new("nmcli")
-            .args([
-                "connection",
-                "add",
-                "type",
-                "wifi",
-                "ifname",
-                interface,
-                "mode",
-                "adhoc",
-                "ssid",
-                &self.network_name,
-                "con-name",
-                &self.network_name,
-            ])
-            .output()
-            .map_err(|e| ConnectoError::Network(format!("nmcli add failed: {}", e)))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ConnectoError::Network(format!(
-                "nmcli connection add failed: {}",
-                stderr
-            )));
-        }
-
-        // Extract UUID from output
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let uuid = Self::parse_nmcli_uuid(&stdout).unwrap_or_default();
-
-        // Configure static IP
-        let _ = Command::new("nmcli")
-            .args([
-                "connection",
-                "modify",
-                &self.network_name,
-                "ipv4.method",
-                "manual",
-                "ipv4.addresses",
-                "192.168.73.1/24",
-            ])
-            .output();
-
-        // Bring up the connection
-        let up_output = Command::new("nmcli")
-            .args(["connection", "up", &self.network_name])
-            .output()
-            .map_err(|e| ConnectoError::Network(format!("nmcli up failed: {}", e)))?;
-
-        if !up_output.status.success() {
-            let stderr = String::from_utf8_lossy(&up_output.stderr);
-            // Clean up the failed connection
-            let _ = Command::new("nmcli")
-                .args(["connection", "delete", &self.network_name])
-                .output();
-            return Err(ConnectoError::Network(format!(
-                "nmcli connection up failed: {}",
-                stderr
-            )));
-        }
-
-        Ok(uuid)
-    }
-
-    /// Parse UUID from nmcli output
-    fn parse_nmcli_uuid(output: &str) -> Option<String> {
-        // Output format: "Connection 'name' (uuid) successfully added."
-        if let Some(start) = output.find('(') {
-            if let Some(end) = output.find(')') {
-                if start < end {
-                    return Some(output[start + 1..end].to_string());
-                }
-            }
-        }
-        None
-    }
-
-    /// Create ad-hoc network using iw (requires root)
-    fn create_network_iw(&self, interface: &str) -> Result<()> {
-        // First, bring down any existing connection
-        let _ = Command::new("ip")
-            .args(["link", "set", interface, "down"])
-            .output();
-
-        // Set interface to IBSS (ad-hoc) mode
-        let output = Command::new("iw")
-            .args([
-                "dev",
-                interface,
-                "ibss",
-                "join",
-                &self.network_name,
-                "2462", // Channel 11 frequency in MHz
-            ])
-            .output()
-            .map_err(|e| ConnectoError::Network(format!("iw ibss join failed: {}", e)))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ConnectoError::Network(format!("iw failed: {}", stderr)));
-        }
-
-        // Bring interface up
-        let _ = Command::new("ip")
-            .args(["link", "set", interface, "up"])
-            .output();
-
-        // Configure IP address
-        self.configure_adhoc_ip("192.168.73.1", interface)?;
-
-        Ok(())
-    }
-
-    /// Configure IP address for ad-hoc network
-    fn configure_adhoc_ip(&self, ip: &str, interface: &str) -> Result<()> {
-        // Flush existing IPs
-        let _ = Command::new("ip")
-            .args(["addr", "flush", "dev", interface])
-            .output();
-
-        // Add new IP
-        let output = Command::new("ip")
-            .args(["addr", "add", &format!("{}/24", ip), "dev", interface])
-            .output()
-            .map_err(|e| ConnectoError::Network(format!("Failed to configure IP: {}", e)))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            // Ignore "file exists" error (IP already configured)
-            if !stderr.contains("File exists") {
-                warn!("Failed to set IP: {}", stderr);
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Scan for connecto ad-hoc networks
-    pub fn scan_for_networks() -> Result<Vec<String>> {
-        let mut networks = Vec::new();
-
-        // Try nmcli first
-        if let Ok(output) = Command::new("nmcli")
-            .args(["-t", "-f", "SSID", "device", "wifi", "list"])
-            .output()
-        {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                let ssid = line.trim();
-                if ssid.starts_with(ADHOC_NETWORK_PREFIX) && !networks.contains(&ssid.to_string()) {
-                    networks.push(ssid.to_string());
-                }
-            }
-        }
-
-        // Fallback to iw scan (requires root typically)
-        if networks.is_empty() {
-            if let Ok(output) = Command::new("iw").args(["dev", "wlan0", "scan"]).output() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.starts_with("SSID:") {
-                        let ssid = trimmed.replace("SSID:", "").trim().to_string();
-                        if ssid.starts_with(ADHOC_NETWORK_PREFIX) && !networks.contains(&ssid) {
-                            networks.push(ssid);
-                        }
-                    }
-                }
-            }
-        }
-
-        debug!("Found {} connecto ad-hoc networks", networks.len());
-        Ok(networks)
-    }
-
-    /// Join an existing connecto ad-hoc network
-    pub fn join_network(&mut self, network_name: &str) -> Result<()> {
-        info!("Joining ad-hoc network: {}", network_name);
-
-        let interface = self
-            .get_wifi_interface()
-            .ok_or_else(|| ConnectoError::Network("No WiFi interface found".to_string()))?;
-        self.interface = Some(interface.clone());
-
-        // Save current network first
-        let _ = self.save_current_network();
-
-        // Try nmcli first
-        let output = Command::new("nmcli")
-            .args(["device", "wifi", "connect", network_name])
-            .output()
-            .map_err(|e| ConnectoError::Network(format!("Failed to join network: {}", e)))?;
-
-        if output.status.success() {
-            self.network_name = network_name.to_string();
-
-            // Configure IP for client (different from host)
-            let _ = self.configure_adhoc_ip("192.168.73.2", &interface);
-
-            info!("Successfully joined network: {}", network_name);
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(ConnectoError::Network(format!(
-                "Failed to join network: {}",
-                stderr
-            )))
-        }
-    }
-
-    /// Restore previous network connection
-    pub fn restore_previous_network(&mut self) -> Result<()> {
-        // Delete the ad-hoc connection if we created one via nmcli
-        if self.connection_uuid.is_some() {
-            let _ = Command::new("nmcli")
-                .args(["connection", "delete", &self.network_name])
-                .output();
-        }
-
-        // If using iw, leave the IBSS network
-        if let Some(ref interface) = self.interface {
-            let _ = Command::new("iw")
-                .args(["dev", interface, "ibss", "leave"])
-                .output();
-        }
-
-        // Reconnect to previous network if we have one
-        if let Some(ref network) = self.previous_network {
-            info!("Restoring previous network: {}", network);
-
-            let output = Command::new("nmcli")
-                .args(["connection", "up", network])
-                .output()
-                .map_err(|e| ConnectoError::Network(format!("Failed to restore network: {}", e)))?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                warn!("Failed to restore network: {}", stderr);
-            }
-        }
-
-        self.is_hosting = false;
-        Ok(())
-    }
-
-    /// Check if we're currently hosting an ad-hoc network
-    pub fn is_hosting(&self) -> bool {
-        self.is_hosting
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl Drop for AdHocNetwork {
-    fn drop(&mut self) {
-        if self.is_hosting {
-            let _ = self.restore_previous_network();
-        }
-    }
-}
-
-// ============================================================================
-// Windows Implementation
-// ============================================================================
-
-/// Ad-hoc network manager for Windows (using netsh hosted network)
-#[cfg(target_os = "windows")]
-pub struct AdHocNetwork {
-    network_name: String,
-    is_hosting: bool,
-    previous_network: Option<String>,
+    /// Set whenever a backend pinned a static IP on a system interface;
+    /// restore resets DHCP based on this flag, independent of whether the
+    /// previous network name could be captured.
+    static_ip_configured: bool,
+    #[cfg(target_os = "windows")]
     password: String,
-    adapter_name: Option<String>,
+    backend: Box<dyn AdHocBackend>,
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 impl AdHocNetwork {
     /// Create a new ad-hoc network manager
     pub fn new(device_name: &str) -> Self {
-        // Sanitize device name for network SSID (same as macOS)
-        let sanitized: String = device_name
-            .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-            .take(20)
-            .collect();
+        #[cfg(target_os = "macos")]
+        let backend: Box<dyn AdHocBackend> = Box::new(macos::MacosBackend::new());
+        #[cfg(target_os = "linux")]
+        let backend: Box<dyn AdHocBackend> = Box::new(linux::LinuxBackend::new());
+        #[cfg(target_os = "windows")]
+        let backend: Box<dyn AdHocBackend> = Box::new(windows::WindowsBackend::new(
+            generate_password(&sanitize_ssid_component(device_name)),
+        ));
 
-        let network_name = format!("{}{}", ADHOC_NETWORK_PREFIX, sanitized);
-
-        // Generate a default password (Windows hosted network requires 8+ chars)
-        let password = format!("connecto{}", &sanitized.chars().take(4).collect::<String>());
-
-        Self {
-            network_name,
-            is_hosting: false,
-            previous_network: None,
-            password,
-            adapter_name: None,
-        }
+        Self::with_backend(device_name, backend)
     }
 
-    /// Create with a custom password
-    pub fn with_password(mut self, password: &str) -> Self {
-        if password.len() >= 8 {
-            self.password = password.to_string();
+    /// Construct with an explicit backend (test seam)
+    fn with_backend(device_name: &str, backend: Box<dyn AdHocBackend>) -> Self {
+        let sanitized = sanitize_ssid_component(device_name);
+
+        Self {
+            network_name: format!("{}{}", ADHOC_NETWORK_PREFIX, sanitized),
+            is_hosting: false,
+            joined: false,
+            previous_network: None,
+            static_ip_configured: false,
+            #[cfg(target_os = "windows")]
+            password: generate_password(&sanitized),
+            backend,
         }
-        self
     }
 
     /// Get the network name
@@ -975,297 +189,142 @@ impl AdHocNetwork {
         &self.network_name
     }
 
-    /// Get the password for the hosted network
+    /// Get the password for the hosted network (Windows hosted networks
+    /// require one; other platforms create open networks)
+    #[cfg(target_os = "windows")]
     pub fn password(&self) -> &str {
         &self.password
     }
 
-    /// Save the current WiFi network so we can rejoin later
-    fn save_current_network(&mut self) -> Result<()> {
-        let output = Command::new("netsh")
-            .args(["wlan", "show", "interfaces"])
-            .output()
-            .map_err(|e| ConnectoError::Network(format!("Failed to get current network: {}", e)))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        // Parse output to find current SSID
-        for line in stdout.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("SSID") && !trimmed.contains("BSSID") {
-                if let Some(ssid) = trimmed.split(':').nth(1) {
-                    let network = ssid.trim().to_string();
-                    if !network.is_empty() {
-                        self.previous_network = Some(network);
-                        debug!("Saved current network: {:?}", self.previous_network);
-                    }
-                }
-                break;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Check if the WiFi adapter supports hosted network
-    fn check_hosted_network_support() -> Result<()> {
-        let output = Command::new("netsh")
-            .args(["wlan", "show", "drivers"])
-            .output()
-            .map_err(|e| ConnectoError::Network(format!("Failed to check drivers: {}", e)))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        // Look for "Hosted network supported : Yes"
-        let supported = stdout
-            .lines()
-            .any(|line| line.contains("Hosted network supported") && line.contains("Yes"));
-
-        if !supported {
-            return Err(ConnectoError::Network(
-                "WiFi adapter does not support Hosted Network.\n\
-                 Check: netsh wlan show drivers (look for 'Hosted network supported: Yes')"
-                    .to_string(),
-            ));
-        }
-
-        Ok(())
-    }
-
-    /// Create and host an ad-hoc network (requires admin privileges)
+    /// Create and host an ad-hoc network
+    ///
+    /// On failure the previous network state is restored before returning.
     pub fn create_network(&mut self) -> Result<String> {
-        info!("Creating hosted network: {}", self.network_name);
+        info!("Creating ad-hoc network: {}", self.network_name);
 
-        // Check for hosted network support
-        Self::check_hosted_network_support()?;
+        self.save_current_network();
 
-        // Save current network first
-        let _ = self.save_current_network();
-
-        // Configure the hosted network
-        let output = Command::new("netsh")
-            .args([
-                "wlan",
-                "set",
-                "hostednetwork",
-                "mode=allow",
-                &format!("ssid={}", self.network_name),
-                &format!("key={}", self.password),
-            ])
-            .output()
-            .map_err(|e| ConnectoError::Network(format!("netsh set failed: {}", e)))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            // Check for admin privileges error
-            if stdout.contains("administrator") || stderr.contains("administrator") {
-                return Err(ConnectoError::Network(
-                    "Administrator privileges required.\n\
-                     Right-click terminal and select 'Run as Administrator'."
-                        .to_string(),
-                ));
+        let ssid = self.network_name.clone();
+        match self.backend.create_network(&ssid) {
+            Ok(outcome) => {
+                self.is_hosting = true;
+                self.apply_outcome(outcome);
+                info!("Ad-hoc network '{}' created", self.network_name);
+                Ok(self.network_name.clone())
             }
-            return Err(ConnectoError::Network(format!(
-                "Failed to configure hosted network: {} {}",
-                stdout, stderr
-            )));
-        }
-
-        // Start the hosted network
-        let start_output = Command::new("netsh")
-            .args(["wlan", "start", "hostednetwork"])
-            .output()
-            .map_err(|e| ConnectoError::Network(format!("netsh start failed: {}", e)))?;
-
-        if !start_output.status.success() {
-            let stderr = String::from_utf8_lossy(&start_output.stderr);
-            let stdout = String::from_utf8_lossy(&start_output.stdout);
-            return Err(ConnectoError::Network(format!(
-                "Failed to start hosted network: {} {}",
-                stdout, stderr
-            )));
-        }
-
-        // Find the hosted network adapter and configure IP
-        if let Some(adapter) = self.find_hosted_network_adapter() {
-            self.adapter_name = Some(adapter.clone());
-            let _ = self.configure_adhoc_ip("192.168.73.1", &adapter);
-        }
-
-        self.is_hosting = true;
-        info!(
-            "Hosted network '{}' created successfully (password: {})",
-            self.network_name, self.password
-        );
-
-        Ok(self.network_name.clone())
-    }
-
-    /// Find the virtual adapter created for the hosted network
-    fn find_hosted_network_adapter(&self) -> Option<String> {
-        let output = Command::new("netsh")
-            .args(["wlan", "show", "hostednetwork"])
-            .output()
-            .ok()?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        // Look for adapter name in output
-        // It's typically "Microsoft Hosted Network Virtual Adapter" or similar
-        // We need to check interface list
-        let interface_output = Command::new("netsh")
-            .args(["interface", "show", "interface"])
-            .output()
-            .ok()?;
-
-        let interface_stdout = String::from_utf8_lossy(&interface_output.stdout);
-
-        // Find the Local Area Connection for hosted network
-        for line in interface_stdout.lines() {
-            if line.contains("Local Area Connection")
-                && (line.contains("Hosted") || stdout.contains("Started"))
-            {
-                // Extract interface name (last column)
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 4 {
-                    return Some(parts[3..].join(" "));
-                }
+            Err(e) => {
+                self.restore_after_failure("create");
+                Err(e)
             }
         }
-
-        // Default to common name
-        Some("Local Area Connection* 12".to_string())
     }
 
-    /// Configure IP address for the hosted network
-    fn configure_adhoc_ip(&self, ip: &str, adapter: &str) -> Result<()> {
-        let output = Command::new("netsh")
-            .args([
-                "interface",
-                "ipv4",
-                "set",
-                "address",
-                &format!("name={}", adapter),
-                "static",
-                ip,
-                "255.255.255.0",
-            ])
-            .output()
-            .map_err(|e| ConnectoError::Network(format!("Failed to configure IP: {}", e)))?;
+    /// Join an existing connecto ad-hoc network
+    ///
+    /// On failure the previous network state is restored before returning.
+    pub fn join_network(&mut self, network_name: &str) -> Result<()> {
+        info!("Joining ad-hoc network: {}", network_name);
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!("Failed to set IP (may already be configured): {}", stderr);
+        self.save_current_network();
+
+        match self.backend.join_network(network_name) {
+            Ok(outcome) => {
+                self.network_name = network_name.to_string();
+                self.joined = true;
+                self.apply_outcome(outcome);
+                info!("Successfully joined network: {}", network_name);
+                Ok(())
+            }
+            Err(e) => {
+                self.restore_after_failure("join");
+                Err(e)
+            }
         }
-
-        Ok(())
     }
 
     /// Scan for connecto ad-hoc networks
     pub fn scan_for_networks() -> Result<Vec<String>> {
-        let mut networks = Vec::new();
-
-        let output = Command::new("netsh")
-            .args(["wlan", "show", "networks", "mode=bssid"])
-            .output()
-            .map_err(|e| ConnectoError::Network(format!("Failed to scan networks: {}", e)))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        // Parse output to find SSIDs starting with our prefix
-        for line in stdout.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("SSID") && !trimmed.contains("BSSID") {
-                if let Some(ssid) = trimmed.split(':').nth(1) {
-                    let network = ssid.trim().to_string();
-                    if network.starts_with(ADHOC_NETWORK_PREFIX) && !networks.contains(&network) {
-                        networks.push(network);
-                    }
-                }
-            }
-        }
-
-        debug!("Found {} connecto ad-hoc networks", networks.len());
-        Ok(networks)
+        #[cfg(target_os = "macos")]
+        return macos::scan_for_networks();
+        #[cfg(target_os = "linux")]
+        return linux::scan_for_networks();
+        #[cfg(target_os = "windows")]
+        return windows::scan_for_networks();
     }
 
-    /// Join an existing connecto ad-hoc network
-    pub fn join_network(&mut self, network_name: &str) -> Result<()> {
-        info!("Joining network: {}", network_name);
-
-        // Save current network first
-        let _ = self.save_current_network();
-
-        // Connect to the network (will prompt for password if needed)
-        let output = Command::new("netsh")
-            .args(["wlan", "connect", &format!("name={}", network_name)])
-            .output()
-            .map_err(|e| ConnectoError::Network(format!("Failed to join network: {}", e)))?;
-
-        if output.status.success() {
-            self.network_name = network_name.to_string();
-            info!("Successfully joined network: {}", network_name);
-
-            // Configure IP for client (different from host)
-            // This might need manual configuration on Windows
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            Err(ConnectoError::Network(format!(
-                "Failed to join network: {} {}",
-                stdout, stderr
-            )))
-        }
-    }
-
-    /// Restore previous network connection
-    pub fn restore_previous_network(&mut self) -> Result<()> {
-        // Stop the hosted network
-        if self.is_hosting {
-            let _ = Command::new("netsh")
-                .args(["wlan", "stop", "hostednetwork"])
-                .output();
-
-            // Optionally disable hosted network mode
-            let _ = Command::new("netsh")
-                .args(["wlan", "set", "hostednetwork", "mode=disallow"])
-                .output();
-        }
-
-        // Reconnect to previous network if we have one
-        if let Some(ref network) = self.previous_network {
-            info!("Restoring previous network: {}", network);
-
-            let output = Command::new("netsh")
-                .args(["wlan", "connect", &format!("name={}", network)])
-                .output()
-                .map_err(|e| ConnectoError::Network(format!("Failed to restore network: {}", e)))?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                warn!("Failed to restore network: {}", stderr);
-            }
-        }
-
+    /// Tear down the ad-hoc network and restore the previous network state
+    ///
+    /// Resets DHCP whenever a static IP was pinned, even when the previous
+    /// network name could not be captured. Idempotent; the `Drop` impl is
+    /// only a backstop for paths that never reach an explicit cleanup.
+    pub fn cleanup(&mut self) -> Result<()> {
+        let result = self
+            .backend
+            .restore(self.previous_network.as_deref(), self.static_ip_configured);
         self.is_hosting = false;
-        Ok(())
+        self.joined = false;
+        self.static_ip_configured = false;
+        result
     }
 
-    /// Check if we're currently hosting an ad-hoc network
-    pub fn is_hosting(&self) -> bool {
-        self.is_hosting
+    /// Whether any system state was changed that `cleanup` must undo
+    fn needs_restore(&self) -> bool {
+        self.is_hosting || self.joined || self.static_ip_configured
+    }
+
+    fn save_current_network(&mut self) {
+        match self.backend.current_network() {
+            Ok(current) => {
+                self.previous_network = current;
+                debug!("Saved current network: {:?}", self.previous_network);
+            }
+            Err(e) => {
+                warn!(
+                    "Could not record the current WiFi network (it will not be auto-restored): {}",
+                    e
+                );
+            }
+        }
+    }
+
+    fn apply_outcome(&mut self, outcome: AdHocOutcome) {
+        self.static_ip_configured |= outcome.static_ip_configured;
+        if let Some(warning) = outcome.warning {
+            warn!("{}", warning);
+        }
+    }
+
+    fn restore_after_failure(&mut self, action: &str) {
+        if let Err(e) = self.cleanup() {
+            warn!(
+                "Failed to restore network state after ad-hoc {} failure: {}",
+                action, e
+            );
+        }
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 impl Drop for AdHocNetwork {
     fn drop(&mut self) {
-        if self.is_hosting {
-            let _ = self.restore_previous_network();
+        if self.needs_restore() {
+            if let Err(e) = self.cleanup() {
+                warn!("Failed to restore network state on drop: {}", e);
+            }
         }
     }
+}
+
+/// Run a blocking ad-hoc operation off the async runtime
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+async fn run_blocking<T, F>(f: F) -> Result<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| ConnectoError::Network(format!("Ad-hoc network task failed: {}", e)))
 }
 
 /// Fallback connection handler
@@ -1310,37 +369,54 @@ impl FallbackHandler {
     ) -> Result<Option<String>> {
         if is_listener {
             // Listener: Create an ad-hoc network
-            if let Some(ref mut adhoc) = self.adhoc {
-                match adhoc.create_network() {
-                    Ok(network_name) => {
-                        info!("Created fallback network: {}", network_name);
-                        // Wait a moment for network to stabilize
-                        tokio::time::sleep(Duration::from_secs(2)).await;
-                        return Ok(Some("192.168.73.1".to_string()));
-                    }
-                    Err(e) => {
-                        warn!("Failed to create ad-hoc network: {}", e);
-                        return Err(e);
-                    }
+            let Some(adhoc) = self.adhoc.take() else {
+                return Ok(None);
+            };
+            let (adhoc, result) = run_blocking(move || {
+                let mut adhoc = adhoc;
+                let result = adhoc.create_network();
+                (adhoc, result)
+            })
+            .await?;
+            self.adhoc = Some(adhoc);
+
+            match result {
+                Ok(network_name) => {
+                    info!("Created fallback network: {}", network_name);
+                    // Wait a moment for network to stabilize
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    Ok(Some(ADHOC_HOST_IP.to_string()))
+                }
+                Err(e) => {
+                    warn!("Failed to create ad-hoc network: {}", e);
+                    Err(e)
                 }
             }
         } else {
             // Scanner: Look for and join connecto ad-hoc networks
-            let networks = AdHocNetwork::scan_for_networks()?;
+            let networks = run_blocking(AdHocNetwork::scan_for_networks).await??;
 
-            if let Some(network) = networks.first() {
-                if let Some(ref mut adhoc) = self.adhoc {
-                    adhoc.join_network(network)?;
-                    // Wait for connection to establish
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    return Ok(Some("192.168.73.1".to_string())); // Return host IP to connect to
-                }
-            } else {
+            let Some(network) = networks.first().cloned() else {
                 info!("No connecto ad-hoc networks found");
-            }
-        }
+                return Ok(None);
+            };
+            let Some(adhoc) = self.adhoc.take() else {
+                return Ok(None);
+            };
+            let (adhoc, result) = run_blocking(move || {
+                let mut adhoc = adhoc;
+                let result = adhoc.join_network(&network);
+                (adhoc, result)
+            })
+            .await?;
+            self.adhoc = Some(adhoc);
+            result?;
 
-        Ok(None)
+            // Wait for connection to establish
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            // Return host IP to connect to
+            Ok(Some(ADHOC_HOST_IP.to_string()))
+        }
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -1352,11 +428,17 @@ impl FallbackHandler {
         Ok(None)
     }
 
-    /// Clean up fallback connections
+    /// Clean up fallback connections, restoring the previous network state
+    ///
+    /// Blocking; async callers should wrap this in `spawn_blocking`.
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn cleanup(&mut self) {
         if let Some(ref mut adhoc) = self.adhoc {
-            let _ = adhoc.restore_previous_network();
+            if adhoc.needs_restore() {
+                if let Err(e) = adhoc.cleanup() {
+                    warn!("Failed to restore previous network state: {}", e);
+                }
+            }
         }
     }
 
@@ -1510,6 +592,212 @@ impl FallbackHandler {
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum Call {
+        CurrentNetwork,
+        Create(String),
+        Join(String),
+        Restore {
+            previous: Option<String>,
+            static_ip_configured: bool,
+        },
+    }
+
+    /// Scripted backend that records every primitive invocation
+    struct MockBackend {
+        calls: Arc<Mutex<Vec<Call>>>,
+        current: Option<String>,
+        /// `Some(outcome)` => succeed once with it; `None` => fail
+        create_result: Option<AdHocOutcome>,
+        join_result: Option<AdHocOutcome>,
+    }
+
+    impl AdHocBackend for MockBackend {
+        fn current_network(&mut self) -> Result<Option<String>> {
+            self.calls.lock().unwrap().push(Call::CurrentNetwork);
+            Ok(self.current.clone())
+        }
+
+        fn create_network(&mut self, ssid: &str) -> Result<AdHocOutcome> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(Call::Create(ssid.to_string()));
+            self.create_result
+                .take()
+                .ok_or_else(|| ConnectoError::Network("mock create failure".to_string()))
+        }
+
+        fn join_network(&mut self, ssid: &str) -> Result<AdHocOutcome> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(Call::Join(ssid.to_string()));
+            self.join_result
+                .take()
+                .ok_or_else(|| ConnectoError::Network("mock join failure".to_string()))
+        }
+
+        fn restore(
+            &mut self,
+            previous_network: Option<&str>,
+            static_ip_configured: bool,
+        ) -> Result<()> {
+            self.calls.lock().unwrap().push(Call::Restore {
+                previous: previous_network.map(String::from),
+                static_ip_configured,
+            });
+            Ok(())
+        }
+    }
+
+    fn mocked_network(
+        current: Option<&str>,
+        create_result: Option<AdHocOutcome>,
+        join_result: Option<AdHocOutcome>,
+    ) -> (AdHocNetwork, Arc<Mutex<Vec<Call>>>) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let backend = MockBackend {
+            calls: Arc::clone(&calls),
+            current: current.map(String::from),
+            create_result,
+            join_result,
+        };
+        (
+            AdHocNetwork::with_backend("Test Device", Box::new(backend)),
+            calls,
+        )
+    }
+
+    fn restore_calls(calls: &Arc<Mutex<Vec<Call>>>) -> Vec<Call> {
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| matches!(c, Call::Restore { .. }))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn test_create_failure_restores_eagerly() {
+        let (mut network, calls) = mocked_network(Some("HomeWiFi"), None, None);
+
+        assert!(network.create_network().is_err());
+
+        // Restore ran inside the failure path, before the caller sees the Err
+        assert_eq!(
+            restore_calls(&calls),
+            vec![Call::Restore {
+                previous: Some("HomeWiFi".to_string()),
+                static_ip_configured: false,
+            }]
+        );
+
+        // The failure path reset the flags, so Drop must not restore again
+        drop(network);
+        assert_eq!(restore_calls(&calls).len(), 1);
+    }
+
+    #[test]
+    fn test_join_failure_restores_eagerly() {
+        let (mut network, calls) = mocked_network(Some("HomeWiFi"), None, None);
+
+        assert!(network.join_network("Connecto-other").is_err());
+        assert_eq!(
+            restore_calls(&calls),
+            vec![Call::Restore {
+                previous: Some("HomeWiFi".to_string()),
+                static_ip_configured: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_cleanup_resets_dhcp_even_without_previous_network() {
+        // previous_network is None (e.g. modern macOS where the SSID is
+        // unreadable) but a static IP was pinned: restore must still run
+        // with static_ip_configured=true so DHCP gets reset.
+        let (mut network, calls) = mocked_network(
+            None,
+            Some(AdHocOutcome {
+                static_ip_configured: true,
+                warning: None,
+            }),
+            None,
+        );
+
+        network.create_network().unwrap();
+        network.cleanup().unwrap();
+
+        assert_eq!(
+            restore_calls(&calls),
+            vec![Call::Restore {
+                previous: None,
+                static_ip_configured: true,
+            }]
+        );
+
+        // Explicit cleanup cleared the flags; Drop is a no-op afterwards
+        drop(network);
+        assert_eq!(restore_calls(&calls).len(), 1);
+    }
+
+    #[test]
+    fn test_drop_restores_after_successful_create() {
+        let (mut network, calls) = mocked_network(
+            Some("HomeWiFi"),
+            Some(AdHocOutcome {
+                static_ip_configured: true,
+                warning: None,
+            }),
+            None,
+        );
+
+        network.create_network().unwrap();
+        drop(network);
+
+        assert_eq!(
+            restore_calls(&calls),
+            vec![Call::Restore {
+                previous: Some("HomeWiFi".to_string()),
+                static_ip_configured: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_drop_restores_after_successful_join() {
+        let (mut network, calls) = mocked_network(
+            Some("HomeWiFi"),
+            None,
+            Some(AdHocOutcome {
+                static_ip_configured: true,
+                warning: None,
+            }),
+        );
+
+        network.join_network("Connecto-host").unwrap();
+        assert_eq!(network.network_name(), "Connecto-host");
+        drop(network);
+
+        assert_eq!(
+            restore_calls(&calls),
+            vec![Call::Restore {
+                previous: Some("HomeWiFi".to_string()),
+                static_ip_configured: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_drop_without_any_action_does_not_restore() {
+        let (network, calls) = mocked_network(Some("HomeWiFi"), None, None);
+        drop(network);
+        assert!(restore_calls(&calls).is_empty());
+    }
 
     #[test]
     fn test_adhoc_network_prefix() {
@@ -1520,8 +808,13 @@ mod tests {
     fn test_network_name_sanitization() {
         let adhoc = AdHocNetwork::new("My Device!@#$%");
         assert!(adhoc.network_name().starts_with(ADHOC_NETWORK_PREFIX));
-        assert!(!adhoc.network_name().contains("!"));
-        assert!(!adhoc.network_name().contains("@"));
+        assert_eq!(adhoc.network_name(), "Connecto-my-device");
+    }
+
+    #[test]
+    fn test_network_name_empty_input_falls_back() {
+        let adhoc = AdHocNetwork::new("!!!");
+        assert_eq!(adhoc.network_name(), "Connecto-device");
     }
 
     #[test]
@@ -1529,56 +822,41 @@ mod tests {
         let adhoc = AdHocNetwork::new("This is a very long device name that should be truncated");
         // ADHOC_NETWORK_PREFIX (9 chars) + max 20 chars = 29 max
         assert!(adhoc.network_name().len() <= 29);
-    }
-}
-
-#[cfg(test)]
-#[cfg(target_os = "linux")]
-mod linux_tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_nmcli_uuid() {
-        let output =
-            "Connection 'Connecto-Test' (abc12345-1234-5678-90ab-cdef12345678) successfully added.";
-        let uuid = AdHocNetwork::parse_nmcli_uuid(output);
-        assert_eq!(
-            uuid,
-            Some("abc12345-1234-5678-90ab-cdef12345678".to_string())
-        );
+        assert!(!adhoc.network_name().ends_with('-'));
     }
 
     #[test]
-    fn test_parse_nmcli_uuid_no_uuid() {
-        let output = "Some other output without UUID";
-        let uuid = AdHocNetwork::parse_nmcli_uuid(output);
-        assert_eq!(uuid, None);
-    }
-}
-
-#[cfg(test)]
-#[cfg(target_os = "windows")]
-mod windows_tests {
-    use super::*;
-
-    #[test]
-    fn test_password_generation() {
-        let adhoc = AdHocNetwork::new("TestDevice");
-        // Password should be at least 8 characters
-        assert!(adhoc.password().len() >= 8);
+    fn test_generate_password_minimum_length() {
+        // Windows hosted networks require 8+ characters even for empty names
+        assert!(generate_password("").len() >= 8);
+        assert_eq!(generate_password("abcdef"), "connectoabcd");
     }
 
     #[test]
-    fn test_custom_password() {
-        let adhoc = AdHocNetwork::new("TestDevice").with_password("mypassword123");
-        assert_eq!(adhoc.password(), "mypassword123");
+    fn test_parse_macos_version() {
+        assert_eq!(parse_macos_version("14.4"), Some((14, 4)));
+        assert_eq!(parse_macos_version("14.4.1"), Some((14, 4)));
+        assert_eq!(parse_macos_version("15.7.7"), Some((15, 7)));
+        assert_eq!(parse_macos_version("14"), Some((14, 0)));
+        assert_eq!(parse_macos_version(" 13.6 "), Some((13, 6)));
+        assert_eq!(parse_macos_version("garbage"), None);
+        assert_eq!(parse_macos_version("14.x"), None);
+        assert_eq!(parse_macos_version(""), None);
     }
 
     #[test]
-    fn test_short_password_ignored() {
-        let adhoc = AdHocNetwork::new("TestDevice").with_password("short");
-        // Short password should be ignored, use default
-        assert!(adhoc.password().len() >= 8);
-        assert_ne!(adhoc.password(), "short");
+    fn test_macos_version_gate() {
+        // >= 14.4 cannot create IBSS networks
+        assert!(macos_ibss_unsupported("14.4"));
+        assert!(macos_ibss_unsupported("14.5"));
+        assert!(macos_ibss_unsupported("15.0"));
+        assert!(macos_ibss_unsupported("15.7.7"));
+        // older versions still can
+        assert!(!macos_ibss_unsupported("14.3.1"));
+        assert!(!macos_ibss_unsupported("13.6"));
+        assert!(!macos_ibss_unsupported("14"));
+        // unparseable input is conservatively treated as modern (fail fast)
+        assert!(macos_ibss_unsupported("garbage"));
+        assert!(macos_ibss_unsupported(""));
     }
 }

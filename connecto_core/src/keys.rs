@@ -124,6 +124,34 @@ fn key_blob(line: &str) -> Option<&str> {
     fields.next()
 }
 
+/// Check if the current process is running with Administrator privileges
+///
+/// This is the single Windows elevation check shared across the workspace
+/// (key management here, `connecto ssh` in the CLI). The result is computed
+/// once per process — elevation cannot change at runtime — so the PowerShell
+/// probe is not re-spawned on every key operation.
+#[cfg(target_os = "windows")]
+pub fn is_windows_admin() -> bool {
+    use std::process::Command;
+    use std::sync::OnceLock;
+
+    static IS_ADMIN: OnceLock<bool> = OnceLock::new();
+
+    *IS_ADMIN.get_or_init(|| {
+        let output = Command::new("powershell")
+            .args([
+                "-Command",
+                "([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)",
+            ])
+            .output();
+
+        match output {
+            Ok(out) => String::from_utf8_lossy(&out.stdout).trim() == "True",
+            Err(_) => false,
+        }
+    })
+}
+
 /// Compute the SHA-256 fingerprint of a public key in OpenSSH format
 ///
 /// Returns the fingerprint in the standard `SHA256:<base64>` form, matching
@@ -206,7 +234,7 @@ impl KeyManager {
         #[cfg(target_os = "windows")]
         {
             // Only use admin path for default SSH directory, not custom dirs (e.g., in tests)
-            if !self.use_custom_dir && Self::is_windows_admin() {
+            if !self.use_custom_dir && is_windows_admin() {
                 // Windows OpenSSH Server uses a special path for admin users
                 PathBuf::from(r"C:\ProgramData\ssh\administrators_authorized_keys")
             } else {
@@ -217,24 +245,6 @@ impl KeyManager {
         #[cfg(not(target_os = "windows"))]
         {
             self.ssh_dir.join("authorized_keys")
-        }
-    }
-
-    /// Check if running as Windows Administrator
-    #[cfg(target_os = "windows")]
-    fn is_windows_admin() -> bool {
-        use std::process::Command;
-
-        let output = Command::new("powershell")
-            .args([
-                "-Command",
-                "([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)",
-            ])
-            .output();
-
-        match output {
-            Ok(out) => String::from_utf8_lossy(&out.stdout).trim() == "True",
-            Err(_) => false,
         }
     }
 
@@ -284,7 +294,7 @@ impl KeyManager {
         {
             // Set proper ACL for Windows admin authorized_keys file
             // The file must be owned by Administrators or SYSTEM and not writable by others
-            if Self::is_windows_admin() {
+            if is_windows_admin() {
                 Self::set_windows_admin_key_permissions(&auth_keys_path)?;
             }
         }

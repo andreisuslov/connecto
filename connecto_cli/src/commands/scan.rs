@@ -100,64 +100,79 @@ pub async fn run_with_options(
     if devices.is_empty() {
         let spinner = super::spinner("magenta", "Scanning for Connecto ad-hoc networks...");
 
-        // Look for connecto ad-hoc networks
+        // Look for connecto ad-hoc networks (blocking subprocess work runs
+        // off the async runtime)
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         {
-            if let Ok(adhoc_networks) = AdHocNetwork::scan_for_networks() {
-                spinner.finish_and_clear();
+            let adhoc_networks = tokio::task::spawn_blocking(AdHocNetwork::scan_for_networks)
+                .await
+                .unwrap_or_else(|_| Ok(Vec::new()))
+                .unwrap_or_default();
+            spinner.finish_and_clear();
 
-                if !adhoc_networks.is_empty() {
-                    info(&format!(
-                        "Found {} Connecto ad-hoc network(s)",
-                        adhoc_networks.len()
-                    ));
-                    println!();
+            if !adhoc_networks.is_empty() {
+                info(&format!(
+                    "Found {} Connecto ad-hoc network(s)",
+                    adhoc_networks.len()
+                ));
+                println!();
 
-                    for (i, network) in adhoc_networks.iter().enumerate() {
-                        println!(
-                            "  {} {} {}",
-                            format!("[{}]", i).green().bold(),
-                            "Ad-hoc:".magenta(),
-                            network.cyan().bold()
-                        );
-                    }
-                    println!();
-
-                    // Ask user if they want to join
+                for (i, network) in adhoc_networks.iter().enumerate() {
                     println!(
-                        "{}",
-                        "These are direct Connecto networks (router bypass).".dimmed()
+                        "  {} {} {}",
+                        format!("[{}]", i).green().bold(),
+                        "Ad-hoc:".magenta(),
+                        network.cyan().bold()
                     );
-                    println!(
-                        "  {} connecto scan --join {}",
-                        "→".cyan(),
-                        adhoc_networks.first().unwrap_or(&String::new())
-                    );
-                    println!();
-
-                    // Try to join the first one automatically and scan
-                    let mut handler = FallbackHandler::new("scanner", Duration::from_secs(10));
-                    if let Ok(Some(host_ip)) = handler.establish_fallback_connection(false).await {
-                        info(&format!("Joined ad-hoc network, host at {}", host_ip));
-
-                        // Now try to connect to the host
-                        let device = DiscoveredDevice {
-                            name: adhoc_networks
-                                .first()
-                                .unwrap_or(&"Connecto-Device".to_string())
-                                .clone(),
-                            hostname: "adhoc.local.".to_string(),
-                            addresses: vec![host_ip
-                                .parse::<IpAddr>()
-                                .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 73, 1)))],
-                            port: DEFAULT_PORT,
-                            instance_name: "adhoc._connecto._tcp.local.".to_string(),
-                        };
-                        devices.push(device);
-                    }
                 }
-            } else {
-                spinner.finish_and_clear();
+                println!();
+
+                // Ask user if they want to join
+                println!(
+                    "{}",
+                    "These are direct Connecto networks (router bypass).".dimmed()
+                );
+                println!(
+                    "  {} connecto scan --join {}",
+                    "→".cyan(),
+                    adhoc_networks.first().unwrap_or(&String::new())
+                );
+                println!();
+
+                // Try to join the first one automatically to probe for the host
+                let mut handler = FallbackHandler::new("scanner", Duration::from_secs(10));
+                let join_result = handler.establish_fallback_connection(false).await;
+
+                // Always restore the previous WiFi state before showing
+                // results, whatever the join attempt did (the AdHocNetwork
+                // Drop impl is only the backstop).
+                let _ = tokio::task::spawn_blocking(move || handler.cleanup()).await;
+
+                if let Ok(Some(host_ip)) = join_result {
+                    info(&format!(
+                        "Found Connecto host at {} via ad-hoc network",
+                        host_ip
+                    ));
+                    println!(
+                        "  {} {}",
+                        "→".cyan(),
+                        "Previous WiFi restored - rejoin the ad-hoc network to pair.".dimmed()
+                    );
+
+                    let device = DiscoveredDevice {
+                        name: adhoc_networks
+                            .first()
+                            .unwrap_or(&"Connecto-Device".to_string())
+                            .clone(),
+                        hostname: "adhoc.local.".to_string(),
+                        addresses: vec![host_ip
+                            .parse::<IpAddr>()
+                            .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 73, 1)))],
+                        port: DEFAULT_PORT,
+                        instance_name: "adhoc._connecto._tcp.local.".to_string(),
+                    };
+                    devices.push(device);
+                }
             }
         }
 

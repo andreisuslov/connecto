@@ -139,15 +139,24 @@ pub async fn run_with_adhoc(
 
     // Track if we should try ad-hoc as fallback
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-    let mut _adhoc_network: Option<AdHocNetwork> = None;
+    let mut adhoc_network: Option<AdHocNetwork> = None;
 
-    // If force_adhoc, create ad-hoc network immediately
+    // If force_adhoc, create ad-hoc network immediately. The blocking
+    // subprocess work runs off the async runtime; on failure the network
+    // state has already been restored by the time the error is returned.
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     if force_adhoc {
         info("Creating ad-hoc WiFi network (forced)...");
-        let mut network = AdHocNetwork::new(&device_name);
+        let network = AdHocNetwork::new(&device_name);
 
-        match network.create_network() {
+        let (network, create_result) = tokio::task::spawn_blocking(move || {
+            let mut network = network;
+            let result = network.create_network();
+            (network, result)
+        })
+        .await?;
+
+        match create_result {
             Ok(network_name) => {
                 success(&format!(
                     "Ad-hoc network created: {}",
@@ -164,34 +173,22 @@ pub async fn run_with_adhoc(
                 #[cfg(target_os = "windows")]
                 println!("  {} Password: {}", "3.".cyan(), network.password().cyan());
                 println!();
-                _adhoc_network = Some(network);
+                adhoc_network = Some(network);
             }
             Err(e) => {
+                // On macOS the error already carries the manual creation
+                // steps (modern macOS cannot create ad-hoc networks from the
+                // command line at all).
                 warn(&format!(
                     "Could not create ad-hoc network automatically: {}",
                     e
                 ));
                 println!();
-                #[cfg(target_os = "macos")]
-                {
-                    println!("{}", "To create manually:".dimmed());
-                    println!(
-                        "  {} Hold Option + click WiFi icon in menu bar",
-                        "1.".cyan()
-                    );
-                    println!("  {} Click 'Create Network...'", "2.".cyan());
-                    println!(
-                        "  {} Name it: {}",
-                        "3.".cyan(),
-                        network.network_name().cyan()
-                    );
-                    println!("  {} Click Create", "4.".cyan());
-                }
                 #[cfg(target_os = "linux")]
                 {
                     println!("{}", "To create manually:".dimmed());
                     println!(
-                        "  {} Run: nmcli con add type wifi ifname wlan0 mode adhoc ssid \"{}\"",
+                        "  {} Run: nmcli con add type wifi ifname <wifi-interface> mode adhoc ssid \"{}\"",
                         "1.".cyan(),
                         network.network_name()
                     );
@@ -482,6 +479,19 @@ pub async fn run_with_adhoc(
     #[cfg(feature = "bluetooth")]
     if let Some(mut handler) = bluetooth_handler {
         let _ = handler.stop_bluetooth_advertising().await;
+    }
+
+    // Tear down the ad-hoc network and restore the previous WiFi state
+    // (explicitly and off the async runtime; Drop is only the backstop)
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    if let Some(network) = adhoc_network.take() {
+        let _ = tokio::task::spawn_blocking(move || {
+            let mut network = network;
+            if let Err(e) = network.cleanup() {
+                warn(&format!("Could not restore the previous network: {}", e));
+            }
+        })
+        .await;
     }
 
     server_result?;
