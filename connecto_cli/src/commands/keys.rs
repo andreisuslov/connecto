@@ -1,6 +1,6 @@
 //! Keys command - Manage authorized keys
 
-use crate::KeysAction;
+use crate::{KeysAction, SilentExit};
 use anyhow::{anyhow, Result};
 use colored::Colorize;
 use connecto_core::keys::KeyManager;
@@ -167,17 +167,9 @@ async fn remove_key(key_manager: &KeyManager, target: &str) -> Result<()> {
 
     if removed {
         success("Key removed successfully.");
+        Ok(())
     } else {
         error("Failed to remove key.");
-    }
-
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_module_compiles() {
-        // Compiling this test is the assertion
+        Err(SilentExit.into())
     }
 }

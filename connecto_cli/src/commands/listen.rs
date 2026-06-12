@@ -436,11 +436,6 @@ pub async fn run_with_adhoc(
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_module_compiles() {
-        // Compiling this test is the assertion
-    }
-
     #[tokio::test]
     async fn test_get_hostname_works() {
         let hostname = get_hostname();

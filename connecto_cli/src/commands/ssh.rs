@@ -2,6 +2,7 @@
 //!
 //! Enables/disables SSH server on Windows, macOS, and Linux
 
+use crate::SilentExit;
 use anyhow::Result;
 use colored::Colorize;
 use std::process::Command;
@@ -53,7 +54,7 @@ pub async fn enable() -> Result<()> {
         "linux" => enable_linux().await,
         _ => {
             println!("{} Unsupported platform.", "✗".red());
-            Ok(())
+            Err(SilentExit.into())
         }
     }
 }
@@ -70,7 +71,7 @@ pub async fn disable() -> Result<()> {
         "linux" => disable_linux().await,
         _ => {
             println!("{} Unsupported platform.", "✗".red());
-            Ok(())
+            Err(SilentExit.into())
         }
     }
 }
@@ -87,7 +88,7 @@ pub async fn status() -> Result<()> {
         "linux" => status_linux().await,
         _ => {
             println!("{} Unsupported platform.", "✗".red());
-            Ok(())
+            Err(SilentExit.into())
         }
     }
 }
@@ -105,7 +106,7 @@ async fn enable_windows() -> Result<()> {
         println!();
         println!("Please run PowerShell as Administrator and try again:");
         println!("  {}", "connecto ssh on".cyan());
-        return Ok(());
+        return Err(SilentExit.into());
     }
 
     println!("{} Enabling OpenSSH Server...", "→".cyan());
@@ -158,7 +159,7 @@ async fn enable_windows() -> Result<()> {
                 if !stderr.is_empty() {
                     println!("{}", stderr.dimmed());
                 }
-                return Ok(());
+                return Err(SilentExit.into());
             }
 
             println!("{} OpenSSH Server installed.", "✓".green());
@@ -180,7 +181,7 @@ async fn enable_windows() -> Result<()> {
             println!("     {}", "powershell -ExecutionPolicy Bypass -File \"C:\\Program Files\\OpenSSH\\install-sshd.ps1\"".dimmed());
             println!();
             println!("  4. Then run {} again.", "connecto ssh on".cyan());
-            return Ok(());
+            return Err(SilentExit.into());
         }
     }
 
@@ -198,7 +199,7 @@ async fn enable_windows() -> Result<()> {
             if !stderr.is_empty() {
                 println!("{}", stderr.dimmed());
             }
-            return Ok(());
+            return Err(SilentExit.into());
         }
     }
 
@@ -258,7 +259,7 @@ async fn disable_windows() -> Result<()> {
         println!();
         println!("Please run PowerShell as Administrator and try again:");
         println!("  {}", "connecto ssh off".cyan());
-        return Ok(());
+        return Err(SilentExit.into());
     }
 
     println!("{} Disabling OpenSSH Server...", "→".cyan());
@@ -271,7 +272,8 @@ async fn disable_windows() -> Result<()> {
         ])
         .output()?;
 
-    if stop_output.status.success() {
+    let stop_ok = stop_output.status.success();
+    if stop_ok {
         println!("{} SSH service stopped.", "✓".green());
     }
 
@@ -283,8 +285,16 @@ async fn disable_windows() -> Result<()> {
         ])
         .output()?;
 
-    if disable_output.status.success() {
+    let disable_ok = disable_output.status.success();
+    if disable_ok {
         println!("{} SSH automatic startup disabled.", "✓".green());
+    }
+
+    // Only claim success when both steps actually succeeded.
+    if !(stop_ok && disable_ok) {
+        println!();
+        println!("{} Failed to disable SSH server.", "✗".red());
+        return Err(SilentExit.into());
     }
 
     println!();
@@ -390,7 +400,7 @@ async fn enable_macos() -> Result<()> {
         println!();
         println!("Please run with sudo:");
         println!("  {}", "sudo connecto ssh on".cyan());
-        return Ok(());
+        return Err(SilentExit.into());
     }
 
     println!("{} Enabling Remote Login (SSH)...", "→".cyan());
@@ -421,7 +431,7 @@ async fn enable_macos() -> Result<()> {
                 "Sharing".cyan(),
                 "Remote Login".cyan()
             );
-            return Ok(());
+            return Err(SilentExit.into());
         }
     }
 
@@ -435,7 +445,7 @@ async fn disable_macos() -> Result<()> {
         println!();
         println!("Please run with sudo:");
         println!("  {}", "sudo connecto ssh off".cyan());
-        return Ok(());
+        return Err(SilentExit.into());
     }
 
     println!("{} Disabling Remote Login (SSH)...", "→".cyan());
@@ -444,15 +454,17 @@ async fn disable_macos() -> Result<()> {
         .args(["-setremotelogin", "off"])
         .output()?;
 
-    if output.status.success() {
-        println!("{} Remote Login (SSH) disabled.", "✓".green());
-    } else {
+    // Only claim success when disabling actually succeeded.
+    if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         println!("{} Failed to disable Remote Login.", "✗".red());
         if !stderr.is_empty() {
             println!("{}", stderr.dimmed());
         }
+        return Err(SilentExit.into());
     }
+
+    println!("{} Remote Login (SSH) disabled.", "✓".green());
 
     println!();
     println!("{}", "SSH Server is now disabled.".yellow());
@@ -512,7 +524,7 @@ async fn enable_linux() -> Result<()> {
         println!();
         println!("Please run with sudo:");
         println!("  {}", "sudo connecto ssh on".cyan());
-        return Ok(());
+        return Err(SilentExit.into());
     }
 
     println!("{} Enabling SSH server...", "→".cyan());
@@ -536,7 +548,7 @@ async fn enable_linux() -> Result<()> {
             "sudo dnf install openssh-server".cyan()
         );
         println!("  {} (Arch)", "sudo pacman -S openssh".cyan());
-        return Ok(());
+        return Err(SilentExit.into());
     }
 
     // Try systemctl first (most modern distros)
@@ -565,7 +577,7 @@ async fn enable_linux() -> Result<()> {
             println!("{} SSH service started.", "✓".green());
         } else {
             println!("{} Failed to start SSH service.", "✗".red());
-            return Ok(());
+            return Err(SilentExit.into());
         }
 
         // Enable on boot
@@ -606,7 +618,7 @@ async fn enable_linux() -> Result<()> {
                     println!("{} SSH service started.", "✓".green());
                 } else {
                     println!("{} Failed to start SSH service.", "✗".red());
-                    return Ok(());
+                    return Err(SilentExit.into());
                 }
             }
         }
@@ -622,7 +634,7 @@ async fn disable_linux() -> Result<()> {
         println!();
         println!("Please run with sudo:");
         println!("  {}", "sudo connecto ssh off".cyan());
-        return Ok(());
+        return Err(SilentExit.into());
     }
 
     println!("{} Disabling SSH server...", "→".cyan());
@@ -637,6 +649,20 @@ async fn disable_linux() -> Result<()> {
         // Stop sshd
         let _ = Command::new("systemctl").args(["stop", "sshd"]).output();
         let _ = Command::new("systemctl").args(["stop", "ssh"]).output();
+
+        // Verify the service actually stopped before claiming success.
+        let still_active = ["sshd", "ssh"].iter().any(|service| {
+            Command::new("systemctl")
+                .args(["is-active", service])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "active")
+                .unwrap_or(false)
+        });
+
+        if still_active {
+            println!("{} Failed to stop SSH service (still active).", "✗".red());
+            return Err(SilentExit.into());
+        }
 
         println!("{} SSH service stopped.", "✓".green());
 

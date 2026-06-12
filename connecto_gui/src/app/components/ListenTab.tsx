@@ -18,6 +18,11 @@ interface ListenerStatus {
   port: number;
 }
 
+interface ListenerInfo extends ListenerStatus {
+  listening: boolean;
+  last_event: string | null;
+}
+
 export function ListenTab() {
   const [isListening, setIsListening] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
@@ -25,11 +30,32 @@ export function ListenTab() {
   const [port, setPort] = useState('8099');
   const [addresses, setAddresses] = useState<string[]>([]);
   const [listenerInfo, setListenerInfo] = useState<ListenerStatus | null>(null);
+  const [lastEvent, setLastEvent] = useState<string | null>(null);
 
   useEffect(() => {
     loadInitialData();
     checkListenerStatus();
   }, []);
+
+  // Poll listener activity (connections, key exchanges) while listening
+  useEffect(() => {
+    if (!isListening) return;
+    const interval = setInterval(async () => {
+      try {
+        const info = await invoke<ListenerInfo>('get_listener_info');
+        if (info.listening) {
+          setLastEvent(info.last_event);
+        } else {
+          setIsListening(false);
+          setListenerInfo(null);
+          setLastEvent(null);
+        }
+      } catch (error) {
+        console.error('Failed to poll listener status:', error);
+      }
+    }, 500);
+    return () => clearInterval(interval);
+  }, [isListening]);
 
   const loadInitialData = async () => {
     try {
@@ -77,6 +103,7 @@ export function ListenTab() {
       await invoke('stop_listener');
       setIsListening(false);
       setListenerInfo(null);
+      setLastEvent(null);
       toast.info('Stopped listening');
     } catch (error) {
       toast.error(`Failed to stop listener: ${error}`);
@@ -105,6 +132,9 @@ export function ListenTab() {
                   <CardDescription className="text-green-700">
                     {listenerInfo ? `${listenerInfo.device_name} on port ${listenerInfo.port}` : `Port ${port}`}
                   </CardDescription>
+                  {lastEvent && (
+                    <CardDescription className="text-green-700">{lastEvent}</CardDescription>
+                  )}
                 </div>
               </div>
               <Button variant="destructive" onClick={handleStopListening}>

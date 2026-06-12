@@ -41,6 +41,12 @@ interface SyncResult {
   error: string | null;
 }
 
+interface SyncStatus {
+  is_syncing: boolean;
+  status_message: string;
+  peer_name: string | null;
+}
+
 interface PairedHost {
   host: string;
   hostname: string;
@@ -62,11 +68,28 @@ export function ScanAndPairTab() {
   const [syncTimeout, setSyncTimeout] = useState('60');
   const [syncUseRsa, setSyncUseRsa] = useState(false);
   const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
+  const [syncStatusMessage, setSyncStatusMessage] = useState('');
 
   // Load paired hosts on mount
   useEffect(() => {
     loadPairedHosts();
   }, []);
+
+  // Poll real sync progress from the backend while a sync is running
+  useEffect(() => {
+    if (!isSyncing) return;
+    const interval = setInterval(async () => {
+      try {
+        const status = await invoke<SyncStatus>('get_sync_status');
+        if (status.status_message) {
+          setSyncStatusMessage(status.status_message);
+        }
+      } catch (error) {
+        console.error('Failed to poll sync status:', error);
+      }
+    }, 500);
+    return () => clearInterval(interval);
+  }, [isSyncing]);
 
   const loadPairedHosts = async () => {
     try {
@@ -158,6 +181,7 @@ export function ScanAndPairTab() {
   const handleStartSync = async () => {
     setIsSyncing(true);
     setSyncResult(null);
+    setSyncStatusMessage('');
     toast.loading('Starting sync - waiting for peer...', { id: 'sync' });
 
     try {
@@ -377,7 +401,9 @@ export function ScanAndPairTab() {
                         <RefreshCw className="size-5 text-purple-600 animate-spin" />
                         <div>
                           <p className="font-medium text-purple-900">Syncing...</p>
-                          <p className="text-sm text-purple-700">Waiting for peer on network</p>
+                          <p className="text-sm text-purple-700">
+                            {syncStatusMessage || 'Waiting for peer on network'}
+                          </p>
                         </div>
                       </div>
                       <Button variant="destructive" size="sm" onClick={handleCancelSync}>

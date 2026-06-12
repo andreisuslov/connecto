@@ -43,6 +43,22 @@ export function SyncTab() {
     loadInitialData();
   }, []);
 
+  // Poll real sync progress from the backend while a sync is running
+  useEffect(() => {
+    if (!isSyncing) return;
+    const interval = setInterval(async () => {
+      try {
+        const status = await invoke<SyncStatus>('get_sync_status');
+        if (status.status_message) {
+          setStatusMessage(status.status_message);
+        }
+      } catch (error) {
+        console.error('Failed to poll sync status:', error);
+      }
+    }, 500);
+    return () => clearInterval(interval);
+  }, [isSyncing]);
+
   const loadInitialData = async () => {
     try {
       const [name, addrs] = await Promise.all([

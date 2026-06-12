@@ -7,7 +7,7 @@ description = "Core library for Connecto - mDNS discovery, SSH key management, a
 
 [features]
 default = []
-bluetooth = ["dep:btleplug", "dep:uuid"]
+bluetooth = ["dep:btleplug", "dep:uuid", "dep:bluer"]
 
 [dependencies]
 tokio = { workspace = true }

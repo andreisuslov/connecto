@@ -598,6 +598,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -629,12 +630,10 @@ version = "0.5.1"
 dependencies = [
  "connecto_core",
  "serde",
- "serde_json",
  "tauri",
  "tauri-build",
  "tempfile",
  "tokio",
- "tracing",
  "tracing-subscriber",
 ]
 

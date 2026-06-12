@@ -4,13 +4,16 @@ use anyhow::Result;
 use colored::Colorize;
 use connecto_core::{
     discovery::{get_hostname, get_local_addresses},
-    keys::{KeyAlgorithm, KeyManager, SshKeyPair},
+    keys::KeyManager,
+    sanitize_device_name,
     sync::{SyncEvent, SyncHandler},
+    AddOutcome, Config, HostEntry, SshConfig,
 };
-use std::path::PathBuf;
+use std::path::Path;
 use tokio::sync::mpsc;
 
-use super::{error, info, success, warn};
+use super::{default_key_comment, error, info, resolve_key_pair, success, warn};
+use crate::SilentExit;
 
 pub async fn run(
     port: u16,
@@ -31,7 +34,7 @@ pub async fn run(
     let addresses = get_local_addresses();
     if addresses.is_empty() {
         error("No network interfaces found");
-        return Ok(());
+        return Err(SilentExit.into());
     }
 
     info(&format!("Device name: {}", device_name.cyan()));
@@ -47,40 +50,30 @@ pub async fn run(
     }
     println!();
 
-    // Get or generate key pair
-    let key_pair = if let Some(key_path) = key_path {
-        info(&format!("Using existing key: {}", key_path.dimmed()));
-        SshKeyPair::load_from_file(&key_path)?
-    } else {
-        let algorithm = if use_rsa {
-            KeyAlgorithm::Rsa4096
-        } else {
-            KeyAlgorithm::Ed25519
-        };
+    // Determine which key to use
+    // Priority: 1. --key flag, 2. config default_key, 3. generate new key
+    let config = Config::load().unwrap_or_default();
+    let comment = default_key_comment(&device_name);
+    let (key_pair, existing_key_path) =
+        resolve_key_pair(key_path.as_deref(), use_rsa, Some(&comment), &config)?;
 
-        // Generate key for this sync
-        let user = std::env::var("USER")
-            .or_else(|_| std::env::var("USERNAME"))
-            .unwrap_or_else(|_| "user".to_string());
-        let comment = format!("{}@{}", user, device_name);
+    // The IdentityFile written to ~/.ssh/config below must be the file that
+    // actually exists on disk. (Generated keys used to be saved under the
+    // LOCAL device name while the config entry pointed at a path derived from
+    // the PEER name — a file that was never created.)
+    let identity_path = match existing_key_path {
+        Some(path) => path,
+        None => {
+            let key_name = format!("connecto_sync_{}", sanitize_device_name(&device_name));
+            let (priv_path, _pub_path) = key_manager.save_key_pair(&key_pair, &key_name)?;
 
-        info(&format!(
-            "Generating {} key for sync...",
-            if use_rsa { "RSA-4096" } else { "Ed25519" }
-        ));
+            info(&format!(
+                "Key saved: {}",
+                priv_path.display().to_string().dimmed()
+            ));
 
-        let key_pair = SshKeyPair::generate(algorithm, &comment)?;
-
-        // Save the key
-        let key_name = format!("connecto_sync_{}", sanitize_hostname(&device_name));
-        let (priv_path, _pub_path) = key_manager.save_key_pair(&key_pair, &key_name)?;
-
-        info(&format!(
-            "Key saved: {}",
-            priv_path.display().to_string().dimmed()
-        ));
-
-        key_pair
+            priv_path
+        }
     };
 
     println!();
@@ -186,16 +179,16 @@ pub async fn run(
             println!();
 
             // Add to SSH config
-            add_to_ssh_config(
+            let ssh_config = SshConfig::at_default()?;
+            let host_alias = write_ssh_config_entry(
+                &ssh_config,
                 &sync_result.peer_name,
                 &sync_result.peer_address.to_string(),
                 &sync_result.peer_user,
-                &key_pair,
-                &key_manager,
+                &identity_path,
             )?;
 
             println!("{}", "Next steps:".bold());
-            let host_alias = sanitize_hostname(&sync_result.peer_name);
             println!(
                 "  {} SSH to peer: {}",
                 "→".cyan(),
@@ -222,176 +215,96 @@ pub async fn run(
                 "•".dimmed(),
                 format!("connecto sync --timeout {}", timeout_secs * 2).cyan()
             );
+            return Err(SilentExit.into());
         }
     }
 
     Ok(())
 }
 
-/// Sanitize hostname for use as SSH host alias
-fn sanitize_hostname(hostname: &str) -> String {
-    hostname
-        .to_lowercase()
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_string()
-}
-
-/// Add synced peer to SSH config
-fn add_to_ssh_config(
+/// Write the synced peer's SSH config entry, pointing at the actual key file
+///
+/// Returns the host alias the entry was written under.
+fn write_ssh_config_entry(
+    ssh_config: &SshConfig,
     peer_name: &str,
     peer_ip: &str,
     peer_user: &str,
-    _key_pair: &SshKeyPair,
-    _key_manager: &KeyManager,
-) -> Result<()> {
-    use std::fs::{self, OpenOptions};
-    use std::io::Write;
+    identity_file: &Path,
+) -> Result<String> {
+    let host_alias = sanitize_device_name(peer_name);
+    let entry = HostEntry {
+        host: host_alias.clone(),
+        hostname: peer_ip.to_string(),
+        user: peer_user.to_string(),
+        identity_file: identity_file.display().to_string(),
+    };
 
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| anyhow::anyhow!("HOME/USERPROFILE not set"))?;
-
-    let ssh_dir = PathBuf::from(&home).join(".ssh");
-    let config_path = ssh_dir.join("config");
-
-    // Ensure .ssh directory exists
-    if !ssh_dir.exists() {
-        fs::create_dir_all(&ssh_dir)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&ssh_dir, fs::Permissions::from_mode(0o700))?;
-        }
+    if ssh_config.add_host(&entry)? == AddOutcome::Replaced {
+        warn(&format!(
+            "Host '{}' already exists in SSH config, updating...",
+            host_alias
+        ));
     }
-
-    let host_alias = sanitize_hostname(peer_name);
-
-    // Check if host already exists
-    if config_path.exists() {
-        let content = fs::read_to_string(&config_path)?;
-        if content.contains(&format!("Host {}", host_alias)) {
-            warn(&format!(
-                "Host '{}' already exists in SSH config, updating...",
-                host_alias
-            ));
-            // Remove existing entry and re-add
-            let new_content = remove_host_from_config(&content, &host_alias);
-            fs::write(&config_path, new_content)?;
-        }
-    }
-
-    // Find the identity file path
-    let key_name = format!("connecto_sync_{}", host_alias);
-    let identity_file = ssh_dir.join(&key_name);
-
-    // Write SSH config entry
-    let entry = format!(
-        "\n# Added by connecto\nHost {}\n    HostName {}\n    User {}\n    IdentityFile {}\n",
-        host_alias,
-        peer_ip,
-        peer_user,
-        identity_file.display()
-    );
-
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&config_path)?;
-
-    file.write_all(entry.as_bytes())?;
-
     info(&format!("Added '{}' to SSH config", host_alias.cyan()));
 
-    Ok(())
-}
-
-/// Remove a host entry from SSH config content
-fn remove_host_from_config(content: &str, host_alias: &str) -> String {
-    let mut new_lines: Vec<&str> = Vec::new();
-    let mut skip_block = false;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        if trimmed == "# Added by connecto" {
-            // Check if this is for our host
-            skip_block = false;
-            new_lines.push(line);
-            continue;
-        }
-
-        if trimmed.starts_with("Host ") && !trimmed.contains('*') {
-            let current_host = trimmed.strip_prefix("Host ").unwrap().trim();
-            if current_host == host_alias {
-                skip_block = true;
-                // Remove the "# Added by connecto" line we just added
-                if new_lines.last().map(|l| l.trim()) == Some("# Added by connecto") {
-                    new_lines.pop();
-                }
-                continue;
-            }
-        }
-
-        if skip_block {
-            if trimmed.starts_with("IdentityFile ") {
-                skip_block = false;
-            }
-            continue;
-        }
-
-        new_lines.push(line);
-    }
-
-    new_lines.join("\n")
+    Ok(host_alias)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use connecto_core::keys::{KeyAlgorithm, SshKeyPair};
+    use tempfile::TempDir;
 
+    /// Regression test for the shipped sync bug: the key was saved under the
+    /// LOCAL device name while the config entry pointed at a path derived from
+    /// the PEER name, so the written IdentityFile never existed on disk.
     #[test]
-    fn test_sanitize_hostname() {
-        assert_eq!(sanitize_hostname("My-Laptop"), "my-laptop");
-        assert_eq!(sanitize_hostname("Device (Work)"), "device--work");
-        assert_eq!(sanitize_hostname("Test.local."), "test-local");
-        assert_eq!(sanitize_hostname("---test---"), "test");
+    fn test_written_identity_file_exists_on_disk() {
+        let temp = TempDir::new().unwrap();
+        let ssh_dir = temp.path().join(".ssh");
+        let key_manager = KeyManager::with_dir(ssh_dir.clone());
+
+        // Key is saved under the LOCAL device name...
+        let key_pair = SshKeyPair::generate(KeyAlgorithm::Ed25519, "user@local").unwrap();
+        let key_name = format!("connecto_sync_{}", sanitize_device_name("Local Machine"));
+        let (priv_path, _) = key_manager.save_key_pair(&key_pair, &key_name).unwrap();
+
+        // ...while the config entry is written for the PEER.
+        let ssh_config = SshConfig::new(ssh_dir.join("config"));
+        let alias =
+            write_ssh_config_entry(&ssh_config, "Peer Box", "10.0.0.7", "bob", &priv_path).unwrap();
+
+        let hosts = ssh_config.list_hosts().unwrap();
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].host, alias);
+        assert_eq!(hosts[0].hostname, "10.0.0.7");
+        assert_eq!(hosts[0].user, "bob");
+        assert!(
+            Path::new(&hosts[0].identity_file).exists(),
+            "IdentityFile written to SSH config must exist on disk: {}",
+            hosts[0].identity_file
+        );
     }
 
     #[test]
-    fn test_remove_host_from_config() {
-        let config = r#"# Some comment
-Host existing
-    HostName 1.2.3.4
-    User alice
+    fn test_write_ssh_config_entry_replaces_existing_alias() {
+        let temp = TempDir::new().unwrap();
+        let ssh_dir = temp.path().join(".ssh");
+        std::fs::create_dir_all(&ssh_dir).unwrap();
+        let key_a = ssh_dir.join("connecto_sync_a");
+        let key_b = ssh_dir.join("connecto_sync_b");
+        std::fs::write(&key_a, "a").unwrap();
+        std::fs::write(&key_b, "b").unwrap();
 
-# Added by connecto
-Host target-host
-    HostName 5.6.7.8
-    User bob
-    IdentityFile ~/.ssh/connecto_target
+        let ssh_config = SshConfig::new(ssh_dir.join("config"));
+        write_ssh_config_entry(&ssh_config, "Peer", "10.0.0.1", "bob", &key_a).unwrap();
+        write_ssh_config_entry(&ssh_config, "Peer", "10.0.0.2", "bob", &key_b).unwrap();
 
-Host another
-    HostName 9.10.11.12
-    User charlie
-"#;
-
-        let result = remove_host_from_config(config, "target-host");
-        assert!(!result.contains("target-host"));
-        assert!(result.contains("existing"));
-        assert!(result.contains("another"));
-    }
-
-    #[test]
-    fn test_module_compiles() {
-        // Compiling this test is the assertion
+        let hosts = ssh_config.list_hosts().unwrap();
+        assert_eq!(hosts.len(), 1, "re-sync must update, not duplicate");
+        assert_eq!(hosts[0].hostname, "10.0.0.2");
+        assert_eq!(hosts[0].identity_file, key_b.display().to_string());
     }
 }

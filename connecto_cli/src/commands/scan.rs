@@ -2,7 +2,9 @@
 
 use anyhow::Result;
 use colored::Colorize;
-use connecto_core::discovery::{DiscoveredDevice, ServiceBrowser, SubnetScanner, DEFAULT_PORT};
+use connecto_core::discovery::{
+    get_local_addresses, DiscoveredDevice, ServiceBrowser, SubnetScanner, DEFAULT_PORT,
+};
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use connecto_core::fallback::AdHocNetwork;
 #[cfg(any(
@@ -10,57 +12,25 @@ use connecto_core::fallback::AdHocNetwork;
     any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
 use connecto_core::fallback::FallbackHandler;
-use indicatif::{ProgressBar, ProgressStyle};
+use connecto_core::Config;
+use directories::ProjectDirs;
 use std::fs;
-use std::io::Write;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::{info, success};
-use std::process::Command as StdCommand;
 
-/// Check if the network appears to be isolated (router blocking device-to-device traffic)
-async fn check_network_isolation() -> bool {
-    // Try to ping a few common local IPs to see if ANY device responds
-    // If only the gateway responds (or nothing), network is likely isolated
-
-    let gateway_responds = tokio::task::spawn_blocking(|| {
-        // Try to ping the gateway (usually .1)
-        StdCommand::new("ping")
-            .args(["-c", "1", "-W", "1", "192.168.0.1"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    })
-    .await
-    .unwrap_or(false);
-
-    let other_device_responds = tokio::task::spawn_blocking(|| {
-        // Try a few random IPs to see if any device responds
-        for i in [2, 10, 20, 50, 100, 150, 200] {
-            let ip = format!("192.168.0.{}", i);
-            if let Ok(output) = StdCommand::new("ping")
-                .args(["-c", "1", "-W", "1", &ip])
-                .output()
-            {
-                if output.status.success() {
-                    return true;
-                }
-            }
-        }
-        false
-    })
-    .await
-    .unwrap_or(false);
-
-    // If gateway responds but no other devices do, network is likely isolated
-    gateway_responds && !other_device_responds
+/// Per-user cache of discovered devices, read back by `connecto pair <n>`
+///
+/// Lives in the user's cache directory (same `ProjectDirs` qualifiers as the
+/// user config), not in world-writable `/tmp`.
+fn default_cache_path() -> Result<PathBuf> {
+    let proj_dirs = ProjectDirs::from("com", "connecto", "connecto")
+        .ok_or_else(|| anyhow::anyhow!("Could not determine cache directory"))?;
+    Ok(proj_dirs.cache_dir().join("devices.json"))
 }
-use crate::config::Config;
-
-/// File to cache discovered devices for the pair command
-const CACHE_FILE: &str = "/tmp/connecto_devices.json";
 
 #[allow(dead_code)]
 pub async fn run(timeout: u64) -> Result<()> {
@@ -94,17 +64,8 @@ pub async fn run_with_options(
     info("Scanning for devices...");
     println!();
 
-    let spinner = ProgressBar::new_spinner();
-    spinner.set_style(
-        ProgressStyle::default_spinner()
-            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-            .template("{spinner:.cyan} {msg}")
-            .unwrap(),
-    );
-
     // Try mDNS first
-    spinner.set_message("Searching via mDNS...");
-    spinner.enable_steady_tick(Duration::from_millis(80));
+    let spinner = super::spinner("cyan", "Searching via mDNS...");
 
     let browser = ServiceBrowser::new()?;
     let mut devices = browser
@@ -115,15 +76,7 @@ pub async fn run_with_options(
 
     // If mDNS found nothing, try subnet scanning (local + configured subnets)
     if devices.is_empty() {
-        let spinner = ProgressBar::new_spinner();
-        spinner.set_style(
-            ProgressStyle::default_spinner()
-                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-                .template("{spinner:.yellow} {msg}")
-                .unwrap(),
-        );
-        spinner.set_message("Scanning subnets...");
-        spinner.enable_steady_tick(Duration::from_millis(80));
+        let spinner = super::spinner("yellow", "Scanning subnets...");
 
         let scanner = SubnetScanner::new(DEFAULT_PORT, Duration::from_millis(500));
 
@@ -145,15 +98,7 @@ pub async fn run_with_options(
 
     // If still no devices, try fallback: scan for ad-hoc networks
     if devices.is_empty() {
-        let spinner = ProgressBar::new_spinner();
-        spinner.set_style(
-            ProgressStyle::default_spinner()
-                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-                .template("{spinner:.magenta} {msg}")
-                .unwrap(),
-        );
-        spinner.set_message("Scanning for Connecto ad-hoc networks...");
-        spinner.enable_steady_tick(Duration::from_millis(80));
+        let spinner = super::spinner("magenta", "Scanning for Connecto ad-hoc networks...");
 
         // Look for connecto ad-hoc networks
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -225,15 +170,7 @@ pub async fn run_with_options(
     // If still no devices and bluetooth is enabled, try BLE scanning
     #[cfg(feature = "bluetooth")]
     if devices.is_empty() && bluetooth_enabled {
-        let spinner = ProgressBar::new_spinner();
-        spinner.set_style(
-            ProgressStyle::default_spinner()
-                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-                .template("{spinner:.blue} {msg}")
-                .unwrap(),
-        );
-        spinner.set_message("Scanning via Bluetooth...");
-        spinner.enable_steady_tick(Duration::from_millis(80));
+        let spinner = super::spinner("blue", "Scanning via Bluetooth...");
 
         let mut handler = FallbackHandler::new("scanner", Duration::from_secs(timeout));
         match handler.scan_bluetooth(Duration::from_secs(timeout)).await {
@@ -291,8 +228,9 @@ pub async fn run_with_options(
     let _ = bluetooth_enabled;
 
     if devices.is_empty() {
-        // Check if network might be isolated (can't reach other devices)
-        let network_isolated = check_network_isolation().await;
+        // We have a usable local address yet nothing answered: the router may
+        // be isolating clients from each other (AP/client isolation).
+        let network_isolated = !get_local_addresses().is_empty();
 
         println!("{}", "No devices found.".yellow());
         println!();
@@ -435,15 +373,27 @@ fn extract_friendly_name(full_name: &str) -> String {
 }
 
 fn cache_devices(devices: &[DiscoveredDevice]) -> Result<()> {
+    cache_devices_to(&default_cache_path()?, devices)
+}
+
+/// Write the device cache to an explicit path (separated for testing)
+fn cache_devices_to(path: &Path, devices: &[DiscoveredDevice]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let json = serde_json::to_string(devices)?;
-    let mut file = fs::File::create(CACHE_FILE)?;
-    file.write_all(json.as_bytes())?;
+    fs::write(path, json)?;
     Ok(())
 }
 
 /// Load cached devices from the scan command
 pub fn load_cached_devices() -> Result<Vec<DiscoveredDevice>> {
-    let content = fs::read_to_string(CACHE_FILE)?;
+    load_cached_devices_from(&default_cache_path()?)
+}
+
+/// Load the device cache from an explicit path (separated for testing)
+fn load_cached_devices_from(path: &Path) -> Result<Vec<DiscoveredDevice>> {
+    let content = fs::read_to_string(path)?;
     let devices: Vec<DiscoveredDevice> = serde_json::from_str(&content)?;
     Ok(devices)
 }
@@ -451,6 +401,7 @@ pub fn load_cached_devices() -> Result<Vec<DiscoveredDevice>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn test_extract_friendly_name() {
@@ -462,7 +413,31 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_file_path() {
-        assert_eq!(CACHE_FILE, "/tmp/connecto_devices.json");
+    fn test_device_cache_round_trip() {
+        let temp = TempDir::new().unwrap();
+        // Nested path: the cache dir is created on demand.
+        let path = temp.path().join("cache").join("devices.json");
+
+        let devices = vec![DiscoveredDevice {
+            name: "Test Device._connecto._tcp.local.".to_string(),
+            hostname: "test.local.".to_string(),
+            addresses: vec!["192.168.1.10".parse().unwrap()],
+            port: 8099,
+            instance_name: "Test._connecto._tcp.local.".to_string(),
+        }];
+
+        cache_devices_to(&path, &devices).unwrap();
+        let loaded = load_cached_devices_from(&path).unwrap();
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, devices[0].name);
+        assert_eq!(loaded[0].addresses, devices[0].addresses);
+        assert_eq!(loaded[0].port, devices[0].port);
+    }
+
+    #[test]
+    fn test_load_cached_devices_missing_file_errors() {
+        let temp = TempDir::new().unwrap();
+        assert!(load_cached_devices_from(&temp.path().join("nope.json")).is_err());
     }
 }
