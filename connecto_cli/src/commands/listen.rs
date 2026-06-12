@@ -4,14 +4,21 @@ use anyhow::Result;
 use colored::Colorize;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use connecto_core::fallback::AdHocNetwork;
+#[cfg(feature = "bluetooth")]
+use connecto_core::fallback::FallbackHandler;
 use connecto_core::{
     discovery::{get_hostname, get_local_addresses, ServiceAdvertiser},
     keys::KeyManager,
     protocol::{HandshakeServer, ServerEvent},
 };
+#[cfg(feature = "bluetooth")]
+use std::time::Duration;
 use tokio::sync::mpsc;
 
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+#[cfg(any(
+    all(feature = "bluetooth"),
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 use super::warn;
 use super::{error, info, success};
 
@@ -116,6 +123,7 @@ pub async fn run_with_adhoc(
     verify: bool,
     continuous: bool,
     force_adhoc: bool,
+    bluetooth_enabled: bool,
 ) -> Result<()> {
     let device_name = name.unwrap_or_else(get_hostname);
     let key_manager = KeyManager::new()?;
@@ -244,6 +252,52 @@ pub async fn run_with_adhoc(
     advertiser.advertise(&device_name, port)?;
     success("mDNS service registered - device is now discoverable");
 
+    // Start Bluetooth advertising if enabled (Linux only)
+    #[cfg(feature = "bluetooth")]
+    let mut bluetooth_handler: Option<FallbackHandler> = None;
+
+    #[cfg(feature = "bluetooth")]
+    if bluetooth_enabled {
+        let mut handler = FallbackHandler::new(&device_name, Duration::from_secs(60));
+
+        // Find first IPv4 address to advertise
+        if let Some(ip) = addresses.iter().find(|a| a.is_ipv4()) {
+            match handler.start_bluetooth_advertising(&device_name, *ip, port).await {
+                Ok(()) => {
+                    success("Bluetooth advertising started");
+                    bluetooth_handler = Some(handler);
+                }
+                Err(e) => {
+                    warn(&format!("Bluetooth advertising failed: {}", e));
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        println!(
+                            "  {} Bluetooth advertising is only supported on Linux.",
+                            "→".cyan()
+                        );
+                    }
+                    #[cfg(target_os = "linux")]
+                    {
+                        println!(
+                            "  {} Ensure BlueZ is installed: sudo apt install bluez",
+                            "→".cyan()
+                        );
+                        println!(
+                            "  {} Add user to bluetooth group: sudo usermod -aG bluetooth $USER",
+                            "→".cyan()
+                        );
+                    }
+                }
+            }
+        } else {
+            warn("No IPv4 address found for Bluetooth advertising");
+        }
+    }
+
+    // Suppress unused variable warning when bluetooth feature is disabled
+    #[cfg(not(feature = "bluetooth"))]
+    let _ = bluetooth_enabled;
+
     // Start handshake server
     let mut server = HandshakeServer::new(key_manager, &device_name).with_verification(verify);
     let addr = server.listen(port).await?;
@@ -364,6 +418,12 @@ pub async fn run_with_adhoc(
     // Clean up
     advertiser.stop()?;
     event_handler.abort();
+
+    // Stop Bluetooth advertising
+    #[cfg(feature = "bluetooth")]
+    if let Some(mut handler) = bluetooth_handler {
+        let _ = handler.stop_bluetooth_advertising().await;
+    }
 
     success("Connecto listener stopped");
     Ok(())

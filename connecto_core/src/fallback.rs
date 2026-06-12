@@ -2,7 +2,7 @@
 //!
 //! Provides alternative connection methods when standard network discovery fails:
 //! - Ad-hoc WiFi network creation and joining
-//! - (Future) Bluetooth discovery
+//! - Bluetooth Low Energy discovery (scanning on all platforms, advertising on Linux)
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use crate::error::ConnectoError;
@@ -1272,6 +1272,10 @@ impl Drop for AdHocNetwork {
 pub struct FallbackHandler {
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     adhoc: Option<AdHocNetwork>,
+    #[cfg(feature = "bluetooth")]
+    bluetooth_browser: Option<crate::bluetooth::BluetoothBrowser>,
+    #[cfg(all(feature = "bluetooth", target_os = "linux"))]
+    bluetooth_advertiser: Option<crate::bluetooth::BluetoothAdvertiser>,
     #[allow(dead_code)]
     timeout: Duration,
 }
@@ -1289,6 +1293,10 @@ impl FallbackHandler {
         Self {
             #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             adhoc: Some(AdHocNetwork::new(device_name)),
+            #[cfg(feature = "bluetooth")]
+            bluetooth_browser: None,
+            #[cfg(all(feature = "bluetooth", target_os = "linux"))]
+            bluetooth_advertiser: None,
             timeout,
         }
     }
@@ -1355,6 +1363,146 @@ impl FallbackHandler {
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     pub fn cleanup(&mut self) {
         // Nothing to clean up on this platform
+    }
+
+    // ========================================================================
+    // Bluetooth Methods
+    // ========================================================================
+
+    /// Scan for Connecto devices via Bluetooth Low Energy
+    ///
+    /// Returns discovered devices that advertise the Connecto BLE service.
+    /// Works on macOS, Linux, and Windows via btleplug.
+    #[cfg(feature = "bluetooth")]
+    pub async fn scan_bluetooth(
+        &mut self,
+        duration: Duration,
+    ) -> Result<Vec<crate::bluetooth::BluetoothDevice>> {
+        use tracing::info;
+
+        // Initialize browser if not already done
+        if self.bluetooth_browser.is_none() {
+            match crate::bluetooth::BluetoothBrowser::new().await {
+                Ok(browser) => {
+                    self.bluetooth_browser = Some(browser);
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+
+        if let Some(ref browser) = self.bluetooth_browser {
+            info!("Starting Bluetooth scan for {} seconds", duration.as_secs());
+            browser.scan(duration).await
+        } else {
+            Ok(vec![])
+        }
+    }
+
+    /// Scan for Connecto devices via Bluetooth Low Energy (stub for non-bluetooth builds)
+    #[cfg(not(feature = "bluetooth"))]
+    pub async fn scan_bluetooth(
+        &mut self,
+        _duration: Duration,
+    ) -> Result<Vec<()>> {
+        Ok(vec![])
+    }
+
+    /// Start advertising this device via Bluetooth Low Energy
+    ///
+    /// Only supported on Linux. Returns an error on other platforms.
+    #[cfg(all(feature = "bluetooth", target_os = "linux"))]
+    pub async fn start_bluetooth_advertising(
+        &mut self,
+        name: &str,
+        ip: std::net::IpAddr,
+        port: u16,
+    ) -> Result<()> {
+        use tracing::info;
+
+        // Initialize advertiser if not already done
+        if self.bluetooth_advertiser.is_none() {
+            match crate::bluetooth::BluetoothAdvertiser::new().await {
+                Ok(advertiser) => {
+                    self.bluetooth_advertiser = Some(advertiser);
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+
+        if let Some(ref mut advertiser) = self.bluetooth_advertiser {
+            info!("Starting Bluetooth advertising: {} at {}:{}", name, ip, port);
+            advertiser.advertise(name, ip, port).await
+        } else {
+            Err(crate::error::ConnectoError::Bluetooth(
+                "Bluetooth advertiser not initialized".to_string(),
+            ))
+        }
+    }
+
+    /// Start advertising this device via Bluetooth Low Energy (non-Linux stub)
+    #[cfg(all(feature = "bluetooth", not(target_os = "linux")))]
+    pub async fn start_bluetooth_advertising(
+        &mut self,
+        _name: &str,
+        _ip: std::net::IpAddr,
+        _port: u16,
+    ) -> Result<()> {
+        Err(crate::error::ConnectoError::Bluetooth(
+            "Bluetooth advertising not supported on this platform. \
+             Use 'connecto listen' on a Linux device for BLE advertising."
+                .to_string(),
+        ))
+    }
+
+    /// Start advertising (stub for non-bluetooth builds)
+    #[cfg(not(feature = "bluetooth"))]
+    pub async fn start_bluetooth_advertising(
+        &mut self,
+        _name: &str,
+        _ip: std::net::IpAddr,
+        _port: u16,
+    ) -> Result<()> {
+        Err(crate::error::ConnectoError::Bluetooth(
+            "Bluetooth feature not enabled. Rebuild with --features bluetooth".to_string(),
+        ))
+    }
+
+    /// Stop Bluetooth advertising
+    #[cfg(all(feature = "bluetooth", target_os = "linux"))]
+    pub async fn stop_bluetooth_advertising(&mut self) -> Result<()> {
+        if let Some(ref mut advertiser) = self.bluetooth_advertiser {
+            advertiser.stop().await
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Stop Bluetooth advertising (non-Linux stub)
+    #[cfg(all(feature = "bluetooth", not(target_os = "linux")))]
+    pub async fn stop_bluetooth_advertising(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Stop Bluetooth advertising (non-bluetooth stub)
+    #[cfg(not(feature = "bluetooth"))]
+    pub async fn stop_bluetooth_advertising(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Check if Bluetooth is available on this system
+    #[cfg(feature = "bluetooth")]
+    pub async fn is_bluetooth_available(&self) -> bool {
+        crate::bluetooth::BluetoothBrowser::new().await.is_ok()
+    }
+
+    /// Check if Bluetooth is available (stub for non-bluetooth builds)
+    #[cfg(not(feature = "bluetooth"))]
+    pub async fn is_bluetooth_available(&self) -> bool {
+        false
     }
 }
 

@@ -49,6 +49,9 @@ pub enum ConnectoError {
 
     #[error("Sync with self: cannot sync a device with itself")]
     SyncWithSelf,
+
+    #[error("Bluetooth error: {0}")]
+    Bluetooth(String),
 }
 
 pub type Result<T> = std::result::Result<T, ConnectoError>;

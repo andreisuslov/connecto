@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Core library for Connecto - mDNS discovery, SSH key management, and pairing protocol"
 
+[features]
+default = []
+bluetooth = ["dep:btleplug", "dep:uuid"]
+
 [dependencies]
 tokio = { workspace = true }
 mdns-sd = { workspace = true }
@@ -20,6 +24,13 @@ hostname = "0.4"
 local-ip-address = "0.6"
 futures = "0.3"
 flume = "0.11"
+
+# Bluetooth (optional)
+btleplug = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+bluer = { workspace = true, optional = true }
 
 [dev-dependencies]
 mockall = { workspace = true }

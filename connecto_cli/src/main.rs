@@ -63,6 +63,10 @@ enum Commands {
         /// Create an ad-hoc WiFi network (bypasses router, for isolated networks)
         #[arg(long)]
         adhoc: bool,
+
+        /// Enable Bluetooth Low Energy advertising (Linux only)
+        #[arg(long)]
+        bluetooth: bool,
     },
 
     /// Scan the local network for devices running Connecto
@@ -74,6 +78,10 @@ enum Commands {
         /// Subnet to scan (e.g., 10.105.225.0/24). Can be specified multiple times.
         #[arg(short, long)]
         subnet: Vec<String>,
+
+        /// Enable Bluetooth Low Energy scanning as a fallback
+        #[arg(long)]
+        bluetooth: bool,
     },
 
     /// Pair with a discovered device
@@ -277,9 +285,10 @@ async fn main() -> Result<()> {
             verify,
             continuous,
             adhoc,
-        } => commands::listen::run_with_adhoc(port, name, verify, continuous, adhoc).await,
-        Commands::Scan { timeout, subnet } => {
-            commands::scan::run_with_options(timeout, false, subnet).await
+            bluetooth,
+        } => commands::listen::run_with_adhoc(port, name, verify, continuous, adhoc, bluetooth).await,
+        Commands::Scan { timeout, subnet, bluetooth } => {
+            commands::scan::run_with_options(timeout, false, subnet, bluetooth).await
         }
         Commands::Pair {
             target,
@@ -972,12 +981,14 @@ mod tests {
                 verify,
                 continuous,
                 adhoc,
+                bluetooth,
             } => {
                 assert_eq!(port, connecto_core::DEFAULT_PORT);
                 assert!(name.is_none());
                 assert!(!verify);
                 assert!(!continuous);
                 assert!(!adhoc);
+                assert!(!bluetooth);
             }
             _ => panic!("Expected Listen command"),
         }
@@ -987,9 +998,10 @@ mod tests {
     fn test_scan_defaults() {
         let cli = Cli::try_parse_from(["connecto", "scan"]).unwrap();
         match cli.command {
-            Commands::Scan { timeout, subnet } => {
+            Commands::Scan { timeout, subnet, bluetooth } => {
                 assert_eq!(timeout, 5);
                 assert!(subnet.is_empty());
+                assert!(!bluetooth);
             }
             _ => panic!("Expected Scan command"),
         }
@@ -999,9 +1011,10 @@ mod tests {
     fn test_scan_with_subnet() {
         let cli = Cli::try_parse_from(["connecto", "scan", "--subnet", "10.0.0.0/24"]).unwrap();
         match cli.command {
-            Commands::Scan { timeout, subnet } => {
+            Commands::Scan { timeout, subnet, bluetooth } => {
                 assert_eq!(timeout, 5);
                 assert_eq!(subnet, vec!["10.0.0.0/24"]);
+                assert!(!bluetooth);
             }
             _ => panic!("Expected Scan command"),
         }
@@ -1019,12 +1032,35 @@ mod tests {
         ])
         .unwrap();
         match cli.command {
-            Commands::Scan { subnet, .. } => {
+            Commands::Scan { subnet, bluetooth, .. } => {
                 assert_eq!(subnet.len(), 2);
                 assert_eq!(subnet[0], "10.0.0.0/24");
                 assert_eq!(subnet[1], "192.168.1.0/24");
+                assert!(!bluetooth);
             }
             _ => panic!("Expected Scan command"),
+        }
+    }
+
+    #[test]
+    fn test_scan_with_bluetooth() {
+        let cli = Cli::try_parse_from(["connecto", "scan", "--bluetooth"]).unwrap();
+        match cli.command {
+            Commands::Scan { bluetooth, .. } => {
+                assert!(bluetooth);
+            }
+            _ => panic!("Expected Scan command"),
+        }
+    }
+
+    #[test]
+    fn test_listen_with_bluetooth() {
+        let cli = Cli::try_parse_from(["connecto", "listen", "--bluetooth"]).unwrap();
+        match cli.command {
+            Commands::Listen { bluetooth, .. } => {
+                assert!(bluetooth);
+            }
+            _ => panic!("Expected Listen command"),
         }
     }
 

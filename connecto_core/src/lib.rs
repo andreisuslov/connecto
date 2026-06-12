@@ -55,6 +55,9 @@ pub mod keys;
 pub mod protocol;
 pub mod sync;
 
+#[cfg(feature = "bluetooth")]
+pub mod bluetooth;
+
 // Re-export commonly used types
 pub use discovery::{
     DiscoveredDevice, DiscoveryEvent, ServiceAdvertiser, ServiceBrowser, SubnetScanner,
@@ -66,6 +69,12 @@ pub use protocol::{
     HandshakeClient, HandshakeServer, Message, PairingResult, ServerEvent, PROTOCOL_VERSION,
 };
 pub use sync::{SyncEvent, SyncHandler, SyncResult, DEFAULT_SYNC_TIMEOUT_SECS, SYNC_SERVICE_TYPE};
+
+#[cfg(feature = "bluetooth")]
+pub use bluetooth::{
+    BluetoothAdvertiser, BluetoothBrowser, BluetoothDevice, BluetoothEvent,
+    BLE_CHAR_DEVICE_INFO, BLE_SERVICE_UUID,
+};
 
 /// Get the version of the connecto_core library
 pub fn version() -> &'static str {

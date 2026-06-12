@@ -3,8 +3,13 @@
 use anyhow::Result;
 use colored::Colorize;
 use connecto_core::discovery::{DiscoveredDevice, ServiceBrowser, SubnetScanner, DEFAULT_PORT};
+#[cfg(any(
+    all(feature = "bluetooth"),
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+use connecto_core::fallback::FallbackHandler;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-use connecto_core::fallback::{AdHocNetwork, FallbackHandler};
+use connecto_core::fallback::AdHocNetwork;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
 use std::io::Write;
@@ -59,18 +64,19 @@ const CACHE_FILE: &str = "/tmp/connecto_devices.json";
 
 #[allow(dead_code)]
 pub async fn run(timeout: u64) -> Result<()> {
-    run_with_options(timeout, false, vec![]).await
+    run_with_options(timeout, false, vec![], false).await
 }
 
 #[allow(dead_code)]
 pub async fn run_with_fallback(timeout: u64, fallback: bool) -> Result<()> {
-    run_with_options(timeout, fallback, vec![]).await
+    run_with_options(timeout, fallback, vec![], false).await
 }
 
 pub async fn run_with_options(
     timeout: u64,
     _fallback: bool,
     cli_subnets: Vec<String>,
+    bluetooth_enabled: bool,
 ) -> Result<()> {
     println!();
     println!("{}", "  CONNECTO SCANNER  ".on_bright_cyan().white().bold());
@@ -215,6 +221,71 @@ pub async fn run_with_options(
             spinner.finish_and_clear();
         }
     }
+
+    // If still no devices and bluetooth is enabled, try BLE scanning
+    #[cfg(feature = "bluetooth")]
+    if devices.is_empty() && bluetooth_enabled {
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_style(
+            ProgressStyle::default_spinner()
+                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+                .template("{spinner:.blue} {msg}")
+                .unwrap(),
+        );
+        spinner.set_message("Scanning via Bluetooth...");
+        spinner.enable_steady_tick(Duration::from_millis(80));
+
+        let mut handler = FallbackHandler::new("scanner", Duration::from_secs(timeout));
+        match handler.scan_bluetooth(Duration::from_secs(timeout)).await {
+            Ok(bt_devices) => {
+                spinner.finish_and_clear();
+
+                if !bt_devices.is_empty() {
+                    info(&format!(
+                        "Found {} device(s) via Bluetooth",
+                        bt_devices.len()
+                    ));
+
+                    // Convert BluetoothDevice to DiscoveredDevice
+                    for bt_device in bt_devices {
+                        if let Some(ip) = bt_device.ip_address {
+                            let device = DiscoveredDevice {
+                                name: format!("{} (BLE)", bt_device.name),
+                                hostname: format!("{}.ble.local.", bt_device.ble_address.replace(':', "")),
+                                addresses: vec![ip],
+                                port: bt_device.port,
+                                instance_name: format!("{}._connecto._tcp.local.", bt_device.name),
+                            };
+                            // Only add if we don't already have this device
+                            if !devices.iter().any(|d| d.addresses.contains(&ip)) {
+                                devices.push(device);
+                            }
+                        } else {
+                            // Device found but no IP info - display for reference
+                            println!(
+                                "  {} {} {}",
+                                "•".blue(),
+                                bt_device.name.cyan(),
+                                format!("(BLE: {}, no IP info)", bt_device.ble_address).dimmed()
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                spinner.finish_and_clear();
+                println!(
+                    "  {} Bluetooth scan failed: {}",
+                    "!".yellow(),
+                    e.to_string().dimmed()
+                );
+            }
+        }
+    }
+
+    // Suppress unused variable warning when bluetooth feature is disabled
+    #[cfg(not(feature = "bluetooth"))]
+    let _ = bluetooth_enabled;
 
     if devices.is_empty() {
         // Check if network might be isolated (can't reach other devices)
