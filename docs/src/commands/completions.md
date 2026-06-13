@@ -81,13 +81,14 @@ After installation:
 
 ```bash
 connecto <Tab>
-# Shows: config  export  hosts  import  listen  pair  scan  test  unpair  update-ip
+# Shows: completions  config  export  hosts  import  keygen  keys  listen
+#        pair  scan  ssh  sync  test  unpair  update-ip
 
 connecto config <Tab>
-# Shows: add-subnet  list  path  remove-subnet
+# Shows: add-subnet  clear-default-key  list  path  remove-subnet  set-default-key
 
 connecto scan --<Tab>
-# Shows: --subnet  --timeout
+# Shows: --bluetooth  --subnet  --timeout
 ```
 
 ## Troubleshooting

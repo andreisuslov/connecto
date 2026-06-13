@@ -10,7 +10,9 @@ connecto hosts
 
 ## Description
 
-The `hosts` command displays all devices you've paired with using Connecto. It reads from `~/.ssh/config` and shows hosts that have Connecto-generated keys.
+The `hosts` command displays all devices you've paired with using Connecto.
+It reads `~/.ssh/config` and lists the entries marked `# Added by connecto`;
+hand-written host blocks are not shown.
 
 ## Example
 
@@ -20,31 +22,23 @@ connecto hosts
 
 Output:
 ```
-  PAIRED HOSTS
+Paired hosts:
 
-[0] mydesktop
-    → Host: 192.168.1.55
-    → User: john
-    → Key:  ~/.ssh/connecto_mydesktop
+  • mydesktop → john@192.168.1.55
+  • workstation → admin@10.0.2.100
+  • laptop → alice@192.168.1.42
 
-[1] workstation
-    → Host: 10.0.2.100
-    → User: admin
-    → Key:  ~/.ssh/connecto_workstation
-
-[2] laptop
-    → Host: 192.168.1.42
-    → User: alice
-    → Key:  ~/.ssh/connecto_laptop
+Connect with:
+  → ssh <hostname>
 ```
 
 ## Output fields
 
 | Field | Description |
 |-------|-------------|
-| Host | IP address or hostname of the remote machine |
+| Host alias | Name to use with the `ssh` command |
 | User | Username for SSH connection |
-| Key | Path to the private key file |
+| Address | IP address or hostname of the remote machine |
 
 ## Related commands
 

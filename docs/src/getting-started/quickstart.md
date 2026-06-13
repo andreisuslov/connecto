@@ -71,6 +71,8 @@ You'll see:
 
 ✓ Pairing successful!
 
+→ Verification code: 627765 — confirm it matches on mydesktop
+
 Key saved:
   • Private: /home/user/.ssh/connecto_mydesktop
   • Public:  /home/user/.ssh/connecto_mydesktop.pub
@@ -99,6 +101,11 @@ That's it! The listener exits automatically after successful pairing.
    - Sent the public key to the listener
    - Listener added it to `~/.ssh/authorized_keys`
    - Client saved the private key and updated `~/.ssh/config`
+
+> **On a shared network?** Run `connecto listen --verify` instead — the
+> listener will then show a 6-digit code and ask for approval before
+> installing any key. Without `--verify`, any device on the network can
+> pair. See [Security](../reference/security.md).
 
 ## Alternative: Bidirectional sync
 

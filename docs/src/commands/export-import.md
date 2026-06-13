@@ -7,25 +7,26 @@ Backup and restore paired hosts configuration.
 ### Usage
 
 ```bash
-connecto export [OUTPUT]
+connecto export [-o <FILE>]
 ```
 
-### Arguments
+### Options
 
-| Argument | Description |
-|----------|-------------|
-| `OUTPUT` | Output file path (optional, prints to stdout if omitted) |
+| Option | Description |
+|--------|-------------|
+| `-o, --output <FILE>` | Output file path (prints to stdout if omitted) |
 
 ### Description
 
-Exports all paired hosts to a JSON file for backup or transfer to another machine.
+Exports all connecto-managed hosts (plus saved subnets) to JSON for backup or
+transfer to another machine.
 
 ### Examples
 
 **Export to file:**
 
 ```bash
-connecto export ~/connecto-backup.json
+connecto export -o ~/connecto-backup.json
 ```
 
 **Export to stdout:**
@@ -50,7 +51,7 @@ connecto export | pbcopy
       "host": "mydesktop",
       "hostname": "192.168.1.55",
       "user": "john",
-      "identity_file": "~/.ssh/connecto_mydesktop"
+      "identity_file": "/home/user/.ssh/connecto_mydesktop"
     }
   ],
   "subnets": ["10.0.2.0/24", "10.0.3.0/24"]
@@ -79,9 +80,11 @@ connecto import <FILE>
 
 Imports paired hosts from a previously exported JSON file. This:
 
-1. Restores SSH key files
-2. Adds entries to `~/.ssh/config`
-3. Restores saved subnets to config
+1. Adds connecto-managed entries to `~/.ssh/config`
+2. Restores saved subnets to the config
+
+It does **not** restore key files — copy those separately (see the export
+notes above). Files with an unsupported `version` are rejected.
 
 ### Example
 
@@ -91,23 +94,19 @@ connecto import ~/connecto-backup.json
 
 Output:
 ```
-  CONNECTO IMPORT
-
-→ Importing from: ~/connecto-backup.json
-
-✓ Imported host: mydesktop
-✓ Imported host: workstation
-✓ Imported 2 subnets
-
-Successfully imported 2 hosts.
+✓ Imported 2 host(s) to SSH config.
+✓ Imported 2 subnet(s) to config.
 ```
 
 ### Handling conflicts
 
-If a host already exists:
-- Existing keys are preserved
-- The import skips that host
-- A warning is displayed
+Hosts whose alias already exists among the connecto-managed entries are
+skipped (exact alias match), so importing the same file twice never creates
+duplicates:
+
+```
+→ All hosts already exist in SSH config.
+```
 
 To replace an existing host, first unpair it:
 
@@ -123,7 +122,7 @@ connecto import backup.json
 ### Backup before reinstall
 
 ```bash
-connecto export > ~/Dropbox/connecto-backup.json
+connecto export -o ~/Dropbox/connecto-backup.json
 # Reinstall OS
 connecto import ~/Dropbox/connecto-backup.json
 ```
@@ -132,7 +131,7 @@ connecto import ~/Dropbox/connecto-backup.json
 
 ```bash
 # On old machine
-connecto export > /tmp/connecto.json
+connecto export -o /tmp/connecto.json
 scp /tmp/connecto.json newmachine:/tmp/
 
 # On new machine
@@ -145,7 +144,7 @@ While not a true sync, you can share exports via cloud storage:
 
 ```bash
 # Machine A
-connecto export > ~/Dropbox/connecto.json
+connecto export -o ~/Dropbox/connecto.json
 
 # Machine B
 connecto import ~/Dropbox/connecto.json
@@ -159,7 +158,7 @@ connecto import ~/Dropbox/connecto.json
 
 ```bash
 # Full backup
-connecto export > connecto-backup.json
+connecto export -o connecto-backup.json
 cp ~/.ssh/connecto_* ~/backup/
 ```
 

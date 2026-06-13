@@ -2,9 +2,68 @@
 
 Manage SSH keys.
 
+## CLI key management
+
+### List authorized keys
+
+List the keys in this machine's `~/.ssh/authorized_keys` (the keys that are
+allowed to SSH in):
+
+```bash
+connecto keys          # same as 'connecto keys list'
+connecto keys list
+```
+
+Output:
+```
+  AUTHORIZED KEYS
+
+2 authorized key(s) found:
+
+[1] ssh-ed25519 AAAAC3NzaC...IGOCspRomTx alice@laptop
+[2] ssh-ed25519 AAAAC3NzaC...w6E5SY8nThb bob@desktop
+
+To remove a key: connecto keys remove <number>
+```
+
+### Remove an authorized key
+
+Remove a key by its number from the list, or by a search pattern matched
+against the key's comment/type:
+
+```bash
+connecto keys remove 2
+connecto keys remove alice@laptop
+```
+
+You are shown the key and asked to confirm before it is removed. If a pattern
+matches multiple keys, the matches are listed and nothing is removed — be
+more specific.
+
+This revokes that device's SSH access to this machine.
+
+### Generate a key pair
+
+```bash
+connecto keygen [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-n, --name <NAME>` | Key file name in `~/.ssh/` (default: `connecto_key`) |
+| `-c, --comment <TEXT>` | Key comment (default: `user@hostname`) |
+| `--rsa` | Generate RSA-4096 instead of Ed25519 |
+
+`keygen` always generates a fresh key — a configured default key
+(`connecto config set-default-key`) does not apply here.
+
+```bash
+connecto keygen --name connecto_work --comment "work laptop"
+```
+
 ## GUI key management
 
-The Connecto GUI provides a full-featured key management interface in the **Keys** tab:
+The Connecto GUI provides a key management interface in the **Keys** tab:
 
 ### Authorized keys
 
@@ -27,39 +86,9 @@ Create new SSH key pairs:
 - Set custom key name and comment
 - Keys are saved to `~/.ssh/`
 
-## CLI key management
+## Useful shell commands
 
-The CLI key management commands are planned for a future release.
-
-### Planned features
-
-#### List keys
-
-```bash
-connecto keys list
-```
-
-Show all Connecto-generated SSH keys.
-
-#### Rotate keys
-
-```bash
-connecto keys rotate <HOST>
-```
-
-Generate a new key pair for a host and update the remote `authorized_keys`.
-
-#### Key info
-
-```bash
-connecto keys info <HOST>
-```
-
-Display key details (type, fingerprint, creation date).
-
-## Current CLI workarounds
-
-### List Connecto keys
+### List Connecto-generated key files
 
 ```bash
 ls -la ~/.ssh/connecto_*
@@ -71,7 +100,7 @@ ls -la ~/.ssh/connecto_*
 ssh-keygen -lf ~/.ssh/connecto_mydesktop.pub
 ```
 
-### Manual key rotation
+### Key rotation
 
 1. Unpair the host: `connecto unpair mydesktop`
 2. Re-pair: `connecto scan && connecto pair 0`

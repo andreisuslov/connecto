@@ -6,12 +6,27 @@
 //!   connecto pair <n>  - Pair with device number n
 
 mod commands;
-mod config;
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
+use connecto_core::{paths, Config, SshConfig};
 use tracing_subscriber::EnvFilter;
+
+/// Marker error for failures whose diagnostics were already printed
+///
+/// Failure sites print their rich colored diagnostics and then return this
+/// error; `main` recognizes it, skips re-printing, and exits with status 1.
+#[derive(Debug)]
+pub struct SilentExit;
+
+impl std::fmt::Display for SilentExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("command failed")
+    }
+}
+
+impl std::error::Error for SilentExit {}
 
 /// Connecto - AirDrop-like SSH key pairing for your terminal
 #[derive(Parser)]
@@ -63,6 +78,10 @@ enum Commands {
         /// Create an ad-hoc WiFi network (bypasses router, for isolated networks)
         #[arg(long)]
         adhoc: bool,
+
+        /// Enable Bluetooth Low Energy advertising (Linux only)
+        #[arg(long)]
+        bluetooth: bool,
     },
 
     /// Scan the local network for devices running Connecto
@@ -74,6 +93,10 @@ enum Commands {
         /// Subnet to scan (e.g., 10.105.225.0/24). Can be specified multiple times.
         #[arg(short, long)]
         subnet: Vec<String>,
+
+        /// Enable Bluetooth Low Energy scanning as a fallback
+        #[arg(long)]
+        bluetooth: bool,
     },
 
     /// Pair with a discovered device
@@ -242,16 +265,13 @@ enum ConfigAction {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    // Enable ANSI color support on Windows
+async fn main() {
+    // Enable ANSI color support on Windows; disable colors entirely when the
+    // console does not support virtual terminal processing.
     #[cfg(windows)]
     {
-        // ANSI escape codes require Windows 10 v1511+ (build 10586+)
-        // On older Windows, disable colors entirely to avoid garbage output
-        if !supports_ansi_colors_windows() {
+        if !enable_vt() {
             colored::control::set_override(false);
-        } else {
-            let _ = colored::control::set_virtual_terminal(true);
         }
     }
 
@@ -270,6 +290,16 @@ async fn main() -> Result<()> {
         .with_target(false)
         .init();
 
+    if let Err(e) = run(cli).await {
+        // SilentExit means the failure site already printed its diagnostics.
+        if e.downcast_ref::<SilentExit>().is_none() {
+            eprintln!("Error: {e:#}");
+        }
+        std::process::exit(1);
+    }
+}
+
+async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Listen {
             port,
@@ -277,10 +307,15 @@ async fn main() -> Result<()> {
             verify,
             continuous,
             adhoc,
-        } => commands::listen::run_with_adhoc(port, name, verify, continuous, adhoc).await,
-        Commands::Scan { timeout, subnet } => {
-            commands::scan::run_with_options(timeout, false, subnet).await
+            bluetooth,
+        } => {
+            commands::listen::run_with_adhoc(port, name, verify, continuous, adhoc, bluetooth).await
         }
+        Commands::Scan {
+            timeout,
+            subnet,
+            bluetooth,
+        } => commands::scan::run_with_options(timeout, false, subnet, bluetooth).await,
         Commands::Pair {
             target,
             comment,
@@ -290,12 +325,16 @@ async fn main() -> Result<()> {
         Commands::Keys { action } => commands::keys::run(action).await,
         Commands::Keygen { name, comment, rsa } => commands::keygen::run(name, comment, rsa).await,
         Commands::Config { action } => run_config(action),
-        Commands::Hosts => run_hosts(),
-        Commands::Unpair { host } => run_unpair(&host),
-        Commands::Test { host } => run_test(&host),
-        Commands::UpdateIp { host, ip } => run_update_ip(&host, &ip),
-        Commands::Export { output } => run_export(output.as_deref()),
-        Commands::Import { file } => run_import(&file),
+        Commands::Hosts => commands::hosts::run_hosts(&SshConfig::at_default()?),
+        Commands::Unpair { host } => commands::hosts::run_unpair(&SshConfig::at_default()?, &host),
+        Commands::Test { host } => commands::hosts::run_test(&host),
+        Commands::UpdateIp { host, ip } => {
+            commands::hosts::run_update_ip(&SshConfig::at_default()?, &host, &ip)
+        }
+        Commands::Export { output } => {
+            commands::hosts::run_export(&SshConfig::at_default()?, output.as_deref())
+        }
+        Commands::Import { file } => commands::hosts::run_import(&SshConfig::at_default()?, &file),
         Commands::Completions { shell } => {
             generate(
                 shell,
@@ -320,108 +359,12 @@ async fn main() -> Result<()> {
     }
 }
 
-fn run_hosts() -> Result<()> {
-    use colored::Colorize;
-    use std::fs;
-
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| anyhow::anyhow!("HOME/USERPROFILE not set"))?;
-    let config_path = std::path::PathBuf::from(&home).join(".ssh").join("config");
-
-    if !config_path.exists() {
-        println!("{}", "No SSH config file found.".dimmed());
-        return Ok(());
-    }
-
-    let content = fs::read_to_string(&config_path)?;
-
-    // Find hosts added by connecto
-    let mut connecto_hosts: Vec<(String, String, String)> = Vec::new();
-    let mut in_connecto_block = false;
-    let mut current_host: Option<String> = None;
-    let mut current_hostname: Option<String> = None;
-    let mut current_user: Option<String> = None;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        if trimmed == "# Added by connecto" {
-            in_connecto_block = true;
-            continue;
-        }
-
-        if in_connecto_block {
-            if trimmed.starts_with("Host ") && !trimmed.contains('*') {
-                // Save previous host if any
-                if let (Some(h), Some(hn), Some(u)) = (
-                    current_host.take(),
-                    current_hostname.take(),
-                    current_user.take(),
-                ) {
-                    connecto_hosts.push((h, hn, u));
-                }
-                current_host = Some(trimmed.strip_prefix("Host ").unwrap().to_string());
-            } else if trimmed.starts_with("HostName ") {
-                current_hostname = Some(trimmed.strip_prefix("HostName ").unwrap().to_string());
-            } else if trimmed.starts_with("User ") {
-                current_user = Some(trimmed.strip_prefix("User ").unwrap().to_string());
-            } else if trimmed.starts_with("IdentityFile ") {
-                // End of this host block
-                if let (Some(h), Some(hn), Some(u)) = (
-                    current_host.take(),
-                    current_hostname.take(),
-                    current_user.take(),
-                ) {
-                    connecto_hosts.push((h, hn, u));
-                }
-                in_connecto_block = false;
-            } else if trimmed.is_empty() || (trimmed.starts_with("Host ") && !in_connecto_block) {
-                in_connecto_block = false;
-            }
-        }
-    }
-
-    // Handle last host if still pending
-    if let (Some(h), Some(hn), Some(u)) = (current_host, current_hostname, current_user) {
-        connecto_hosts.push((h, hn, u));
-    }
-
-    if connecto_hosts.is_empty() {
-        println!("{}", "No paired hosts found.".dimmed());
-        println!();
-        println!(
-            "Pair with a device using: {}",
-            "connecto scan && connecto pair 0".cyan()
-        );
-        return Ok(());
-    }
-
-    println!("{}", "Paired hosts:".bold());
-    println!();
-    for (host, hostname, user) in &connecto_hosts {
-        println!(
-            "  {} {} → {}@{}",
-            "•".green(),
-            host.cyan().bold(),
-            user.dimmed(),
-            hostname.dimmed()
-        );
-    }
-    println!();
-    println!("{}", "Connect with:".dimmed());
-    println!("  {} ssh <hostname>", "→".cyan());
-    println!();
-
-    Ok(())
-}
-
 fn run_config(action: ConfigAction) -> Result<()> {
     use colored::Colorize;
 
     match action {
         ConfigAction::AddSubnet { subnet } => {
-            let mut cfg = config::Config::load()?;
+            let mut cfg = Config::load()?;
             if cfg.add_subnet(&subnet) {
                 cfg.save()?;
                 println!("{} Added subnet: {}", "✓".green(), subnet.cyan());
@@ -430,34 +373,26 @@ fn run_config(action: ConfigAction) -> Result<()> {
             }
         }
         ConfigAction::RemoveSubnet { subnet } => {
-            let mut cfg = config::Config::load()?;
+            let mut cfg = Config::load()?;
             if cfg.remove_subnet(&subnet) {
                 cfg.save()?;
                 println!("{} Removed subnet: {}", "✓".green(), subnet);
             } else {
                 println!("{} Subnet not found: {}", "✗".red(), subnet);
+                return Err(SilentExit.into());
             }
         }
         ConfigAction::SetDefaultKey { key_path } => {
-            // Expand ~ to home directory
-            let expanded_path = if key_path.starts_with("~/") {
-                let home = std::env::var("HOME")
-                    .or_else(|_| std::env::var("USERPROFILE"))
-                    .map_err(|_| anyhow::anyhow!("HOME/USERPROFILE not set"))?;
-                key_path.replacen("~", &home, 1)
-            } else {
-                key_path.clone()
-            };
+            let expanded = paths::expand_tilde(&key_path)?;
 
             // Verify the key exists
-            let key_file = std::path::Path::new(&expanded_path);
-            if !key_file.exists() {
-                println!("{} Key file not found: {}", "✗".red(), expanded_path);
-                return Ok(());
+            if !expanded.exists() {
+                println!("{} Key file not found: {}", "✗".red(), expanded.display());
+                return Err(SilentExit.into());
             }
 
             // Verify it's a valid SSH key (check for public key too)
-            let pub_key_path = format!("{}.pub", expanded_path);
+            let pub_key_path = format!("{}.pub", expanded.display());
             if !std::path::Path::new(&pub_key_path).exists() {
                 println!(
                     "{} Public key not found: {}",
@@ -468,17 +403,21 @@ fn run_config(action: ConfigAction) -> Result<()> {
                     "  {} Both private and public key files are required.",
                     "→".yellow()
                 );
-                return Ok(());
+                return Err(SilentExit.into());
             }
 
-            let mut cfg = config::Config::load()?;
-            cfg.set_default_key(&expanded_path);
+            let mut cfg = Config::load()?;
+            cfg.set_default_key(&expanded.display().to_string());
             cfg.save()?;
-            println!("{} Default key set: {}", "✓".green(), expanded_path.cyan());
+            println!(
+                "{} Default key set: {}",
+                "✓".green(),
+                expanded.display().to_string().cyan()
+            );
             println!("  {} All future pairings will use this key.", "→".dimmed());
         }
         ConfigAction::ClearDefaultKey => {
-            let mut cfg = config::Config::load()?;
+            let mut cfg = Config::load()?;
             if cfg.default_key.is_some() {
                 cfg.clear_default_key();
                 cfg.save()?;
@@ -489,7 +428,7 @@ fn run_config(action: ConfigAction) -> Result<()> {
             }
         }
         ConfigAction::List => {
-            let cfg = config::Config::load()?;
+            let cfg = Config::load()?;
             let mut has_config = false;
 
             if !cfg.subnets.is_empty() {
@@ -521,435 +460,43 @@ fn run_config(action: ConfigAction) -> Result<()> {
             }
         }
         ConfigAction::Path => {
-            let path = config::Config::path()?;
+            let path = Config::path()?;
             println!("{}", path.display());
         }
     }
     Ok(())
 }
 
-/// Remove a paired host from SSH config and delete its keys
-fn run_unpair(host: &str) -> Result<()> {
-    use colored::Colorize;
-    use std::fs;
-
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| anyhow::anyhow!("HOME/USERPROFILE not set"))?;
-    let ssh_dir = std::path::PathBuf::from(&home).join(".ssh");
-    let config_path = ssh_dir.join("config");
-
-    if !config_path.exists() {
-        println!("{} No SSH config file found.", "✗".red());
-        return Ok(());
-    }
-
-    let content = fs::read_to_string(&config_path)?;
-    let mut new_lines: Vec<&str> = Vec::new();
-    let mut skip_block = false;
-    let mut found = false;
-    let mut identity_file: Option<String> = None;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        if trimmed == "# Added by connecto" {
-            // Check next line for our host
-            skip_block = false;
-            new_lines.push(line);
-            continue;
-        }
-
-        if trimmed.starts_with("Host ") && !trimmed.contains('*') {
-            let host_name = trimmed.strip_prefix("Host ").unwrap().trim();
-            if host_name == host {
-                skip_block = true;
-                found = true;
-                // Remove the "# Added by connecto" line we just added
-                if new_lines.last().map(|l| l.trim()) == Some("# Added by connecto") {
-                    new_lines.pop();
-                }
-                continue;
-            }
-        }
-
-        if skip_block {
-            if trimmed.starts_with("IdentityFile ") {
-                identity_file = Some(
-                    trimmed
-                        .strip_prefix("IdentityFile ")
-                        .unwrap()
-                        .trim()
-                        .to_string(),
-                );
-            }
-            if trimmed.is_empty()
-                || (trimmed.starts_with("Host ") && !trimmed.starts_with("HostName"))
-            {
-                skip_block = false;
-                if !trimmed.is_empty() {
-                    new_lines.push(line);
-                }
-            }
-            continue;
-        }
-
-        new_lines.push(line);
-    }
-
-    if !found {
-        println!("{} Host '{}' not found in SSH config.", "✗".red(), host);
-        return Ok(());
-    }
-
-    // Write updated config
-    fs::write(&config_path, new_lines.join("\n") + "\n")?;
-    println!("{} Removed '{}' from SSH config.", "✓".green(), host.cyan());
-
-    // Delete key files
-    if let Some(key_path) = identity_file {
-        let key_path = std::path::PathBuf::from(&key_path);
-        let pub_path = key_path.with_extension("pub");
-
-        if key_path.exists() {
-            fs::remove_file(&key_path)?;
-            println!(
-                "{} Deleted private key: {}",
-                "✓".green(),
-                key_path.display().to_string().dimmed()
-            );
-        }
-        if pub_path.exists() {
-            fs::remove_file(&pub_path)?;
-            println!(
-                "{} Deleted public key: {}",
-                "✓".green(),
-                pub_path.display().to_string().dimmed()
-            );
-        }
-    }
-
-    Ok(())
-}
-
-/// Test SSH connection to a paired host
-fn run_test(host: &str) -> Result<()> {
-    use colored::Colorize;
-    use std::process::Command;
-
-    println!(
-        "{} Testing connection to {}...",
-        "→".cyan(),
-        host.cyan().bold()
-    );
-
-    let output = Command::new("ssh")
-        .args([
-            "-o",
-            "ConnectTimeout=5",
-            "-o",
-            "BatchMode=yes",
-            host,
-            "echo",
-            "connecto-ok",
-        ])
-        .output();
-
-    match output {
-        Ok(result) => {
-            if result.status.success() {
-                let stdout = String::from_utf8_lossy(&result.stdout);
-                if stdout.trim() == "connecto-ok" {
-                    println!("{} Connection successful!", "✓".green());
-                    Ok(())
-                } else {
-                    println!(
-                        "{} Connection established but unexpected response.",
-                        "⚠".yellow()
-                    );
-                    Ok(())
-                }
-            } else {
-                let stderr = String::from_utf8_lossy(&result.stderr);
-                println!("{} Connection failed.", "✗".red());
-                if !stderr.is_empty() {
-                    println!("{}", stderr.dimmed());
-                }
-                println!();
-                println!("{}", "Troubleshooting:".bold());
-                println!("  {} Check if the host is online", "•".dimmed());
-                println!(
-                    "  {} Verify the IP is correct: {}",
-                    "•".dimmed(),
-                    "connecto hosts".cyan()
-                );
-                println!(
-                    "  {} Update IP if changed: {}",
-                    "•".dimmed(),
-                    format!("connecto update-ip {} <new-ip>", host).cyan()
-                );
-                Ok(())
-            }
-        }
-        Err(e) => {
-            println!("{} Failed to run ssh: {}", "✗".red(), e);
-            Ok(())
-        }
-    }
-}
-
-/// Update IP address for a paired host
-fn run_update_ip(host: &str, new_ip: &str) -> Result<()> {
-    use colored::Colorize;
-    use std::fs;
-
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| anyhow::anyhow!("HOME/USERPROFILE not set"))?;
-    let config_path = std::path::PathBuf::from(&home).join(".ssh").join("config");
-
-    if !config_path.exists() {
-        println!("{} No SSH config file found.", "✗".red());
-        return Ok(());
-    }
-
-    let content = fs::read_to_string(&config_path)?;
-    let mut new_content = String::new();
-    let mut in_target_block = false;
-    let mut found = false;
-    let mut old_ip = String::new();
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        if trimmed.starts_with("Host ") && !trimmed.contains('*') {
-            let host_name = trimmed.strip_prefix("Host ").unwrap().trim();
-            in_target_block = host_name == host;
-        }
-
-        if in_target_block && trimmed.starts_with("HostName ") {
-            old_ip = trimmed
-                .strip_prefix("HostName ")
-                .unwrap()
-                .trim()
-                .to_string();
-            new_content.push_str(&format!("    HostName {}\n", new_ip));
-            found = true;
-            continue;
-        }
-
-        new_content.push_str(line);
-        new_content.push('\n');
-    }
-
-    if !found {
-        println!("{} Host '{}' not found in SSH config.", "✗".red(), host);
-        return Ok(());
-    }
-
-    fs::write(&config_path, new_content)?;
-    println!(
-        "{} Updated '{}' IP: {} → {}",
-        "✓".green(),
-        host.cyan(),
-        old_ip.dimmed(),
-        new_ip.cyan().bold()
-    );
-
-    Ok(())
-}
-
-/// Export paired hosts configuration
-fn run_export(output: Option<&str>) -> Result<()> {
-    use colored::Colorize;
-    use serde::{Deserialize, Serialize};
-    use std::fs;
-
-    #[derive(Serialize, Deserialize)]
-    struct ExportedHost {
-        host: String,
-        hostname: String,
-        user: String,
-        identity_file: String,
-    }
-
-    #[derive(Serialize, Deserialize)]
-    struct ExportData {
-        version: u32,
-        hosts: Vec<ExportedHost>,
-        subnets: Vec<String>,
-    }
-
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| anyhow::anyhow!("HOME/USERPROFILE not set"))?;
-    let config_path = std::path::PathBuf::from(&home).join(".ssh").join("config");
-
-    let mut hosts = Vec::new();
-
-    if config_path.exists() {
-        let content = fs::read_to_string(&config_path)?;
-        let mut in_connecto_block = false;
-        let mut current = ExportedHost {
-            host: String::new(),
-            hostname: String::new(),
-            user: String::new(),
-            identity_file: String::new(),
-        };
-
-        for line in content.lines() {
-            let trimmed = line.trim();
-
-            if trimmed == "# Added by connecto" {
-                in_connecto_block = true;
-                continue;
-            }
-
-            if in_connecto_block {
-                if trimmed.starts_with("Host ") && !trimmed.contains('*') {
-                    if !current.host.is_empty() {
-                        hosts.push(current);
-                        current = ExportedHost {
-                            host: String::new(),
-                            hostname: String::new(),
-                            user: String::new(),
-                            identity_file: String::new(),
-                        };
-                    }
-                    current.host = trimmed.strip_prefix("Host ").unwrap().to_string();
-                } else if trimmed.starts_with("HostName ") {
-                    current.hostname = trimmed.strip_prefix("HostName ").unwrap().to_string();
-                } else if trimmed.starts_with("User ") {
-                    current.user = trimmed.strip_prefix("User ").unwrap().to_string();
-                } else if trimmed.starts_with("IdentityFile ") {
-                    current.identity_file =
-                        trimmed.strip_prefix("IdentityFile ").unwrap().to_string();
-                    hosts.push(current);
-                    current = ExportedHost {
-                        host: String::new(),
-                        hostname: String::new(),
-                        user: String::new(),
-                        identity_file: String::new(),
-                    };
-                    in_connecto_block = false;
-                }
-            }
-        }
-    }
-
-    let cfg = config::Config::load().unwrap_or_default();
-
-    let export_data = ExportData {
-        version: 1,
-        hosts,
-        subnets: cfg.subnets,
+/// Enable ANSI escape-code (virtual terminal) processing on the Windows console
+///
+/// Returns `false` when the console mode could not be queried or updated
+/// (e.g. pre-VT Windows, or stdout is not a console), so the caller can
+/// disable colors instead of emitting garbage escape sequences.
+#[cfg(windows)]
+fn enable_vt() -> bool {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, SetConsoleMode, CONSOLE_MODE,
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_OUTPUT_HANDLE,
     };
 
-    let json = serde_json::to_string_pretty(&export_data)?;
-
-    if let Some(path) = output {
-        fs::write(path, &json)?;
-        println!(
-            "{} Exported {} host(s) to {}",
-            "✓".green(),
-            export_data.hosts.len(),
-            path.cyan()
-        );
-    } else {
-        println!("{}", json);
-    }
-
-    Ok(())
-}
-
-/// Import paired hosts configuration
-fn run_import(file: &str) -> Result<()> {
-    use colored::Colorize;
-    use serde::{Deserialize, Serialize};
-    use std::fs;
-
-    #[derive(Serialize, Deserialize)]
-    struct ExportedHost {
-        host: String,
-        hostname: String,
-        user: String,
-        identity_file: String,
-    }
-
-    #[derive(Serialize, Deserialize)]
-    struct ExportData {
-        version: u32,
-        hosts: Vec<ExportedHost>,
-        subnets: Vec<String>,
-    }
-
-    let content = fs::read_to_string(file)?;
-    let data: ExportData = serde_json::from_str(&content)?;
-
-    if data.version != 1 {
-        return Err(anyhow::anyhow!(
-            "Unsupported export version: {}",
-            data.version
-        ));
-    }
-
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| anyhow::anyhow!("HOME/USERPROFILE not set"))?;
-    let ssh_dir = std::path::PathBuf::from(&home).join(".ssh");
-    let config_path = ssh_dir.join("config");
-
-    // Create .ssh directory if needed
-    if !ssh_dir.exists() {
-        fs::create_dir_all(&ssh_dir)?;
-    }
-
-    // Read existing config
-    let mut existing = String::new();
-    if config_path.exists() {
-        existing = fs::read_to_string(&config_path)?;
-    }
-
-    // Add hosts that don't already exist
-    let mut added = 0;
-    for host in &data.hosts {
-        let host_pattern = format!("Host {}", host.host);
-        if !existing.contains(&host_pattern) {
-            let entry = format!(
-                "\n# Added by connecto\nHost {}\n    HostName {}\n    User {}\n    IdentityFile {}\n",
-                host.host, host.hostname, host.user, host.identity_file
-            );
-            existing.push_str(&entry);
-            added += 1;
+    // SAFETY: Win32 console calls on the process's own stdout handle; the
+    // mode pointer is a local that outlives the call.
+    unsafe {
+        let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+            return false;
         }
-    }
 
-    if added > 0 {
-        fs::write(&config_path, &existing)?;
-        println!("{} Imported {} host(s) to SSH config.", "✓".green(), added);
-    } else {
-        println!("{} All hosts already exist in SSH config.", "→".yellow());
-    }
-
-    // Import subnets
-    let mut cfg = config::Config::load().unwrap_or_default();
-    let mut subnet_added = 0;
-    for subnet in &data.subnets {
-        if cfg.add_subnet(subnet) {
-            subnet_added += 1;
+        let mut mode: CONSOLE_MODE = 0;
+        if GetConsoleMode(handle, &mut mode) == 0 {
+            return false;
         }
+        if mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0 {
+            return true;
+        }
+        SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0
     }
-
-    if subnet_added > 0 {
-        cfg.save()?;
-        println!(
-            "{} Imported {} subnet(s) to config.",
-            "✓".green(),
-            subnet_added
-        );
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -972,12 +519,14 @@ mod tests {
                 verify,
                 continuous,
                 adhoc,
+                bluetooth,
             } => {
                 assert_eq!(port, connecto_core::DEFAULT_PORT);
                 assert!(name.is_none());
                 assert!(!verify);
                 assert!(!continuous);
                 assert!(!adhoc);
+                assert!(!bluetooth);
             }
             _ => panic!("Expected Listen command"),
         }
@@ -987,9 +536,14 @@ mod tests {
     fn test_scan_defaults() {
         let cli = Cli::try_parse_from(["connecto", "scan"]).unwrap();
         match cli.command {
-            Commands::Scan { timeout, subnet } => {
+            Commands::Scan {
+                timeout,
+                subnet,
+                bluetooth,
+            } => {
                 assert_eq!(timeout, 5);
                 assert!(subnet.is_empty());
+                assert!(!bluetooth);
             }
             _ => panic!("Expected Scan command"),
         }
@@ -999,9 +553,14 @@ mod tests {
     fn test_scan_with_subnet() {
         let cli = Cli::try_parse_from(["connecto", "scan", "--subnet", "10.0.0.0/24"]).unwrap();
         match cli.command {
-            Commands::Scan { timeout, subnet } => {
+            Commands::Scan {
+                timeout,
+                subnet,
+                bluetooth,
+            } => {
                 assert_eq!(timeout, 5);
                 assert_eq!(subnet, vec!["10.0.0.0/24"]);
+                assert!(!bluetooth);
             }
             _ => panic!("Expected Scan command"),
         }
@@ -1019,12 +578,37 @@ mod tests {
         ])
         .unwrap();
         match cli.command {
-            Commands::Scan { subnet, .. } => {
+            Commands::Scan {
+                subnet, bluetooth, ..
+            } => {
                 assert_eq!(subnet.len(), 2);
                 assert_eq!(subnet[0], "10.0.0.0/24");
                 assert_eq!(subnet[1], "192.168.1.0/24");
+                assert!(!bluetooth);
             }
             _ => panic!("Expected Scan command"),
+        }
+    }
+
+    #[test]
+    fn test_scan_with_bluetooth() {
+        let cli = Cli::try_parse_from(["connecto", "scan", "--bluetooth"]).unwrap();
+        match cli.command {
+            Commands::Scan { bluetooth, .. } => {
+                assert!(bluetooth);
+            }
+            _ => panic!("Expected Scan command"),
+        }
+    }
+
+    #[test]
+    fn test_listen_with_bluetooth() {
+        let cli = Cli::try_parse_from(["connecto", "listen", "--bluetooth"]).unwrap();
+        match cli.command {
+            Commands::Listen { bluetooth, .. } => {
+                assert!(bluetooth);
+            }
+            _ => panic!("Expected Listen command"),
         }
     }
 
@@ -1105,30 +689,10 @@ mod tests {
             _ => panic!("Expected Sync command"),
         }
     }
-}
 
-/// Check if the Windows version supports ANSI escape codes
-/// Requires Windows 10 version 1511 (build 10586) or later
-#[cfg(windows)]
-fn supports_ansi_colors_windows() -> bool {
-    use std::process::Command;
-
-    // Get Windows build number via PowerShell
-    let output = Command::new("powershell")
-        .args(["-Command", "[Environment]::OSVersion.Version.Build"])
-        .output();
-
-    match output {
-        Ok(out) => {
-            let build_str = String::from_utf8_lossy(&out.stdout);
-            if let Ok(build) = build_str.trim().parse::<u32>() {
-                // Windows 10 v1511 is build 10586, which introduced ANSI support
-                build >= 10586
-            } else {
-                // Can't parse build number, assume no support
-                false
-            }
-        }
-        Err(_) => false,
+    #[test]
+    fn test_silent_exit_is_detectable_via_downcast() {
+        let err: anyhow::Error = SilentExit.into();
+        assert!(err.downcast_ref::<SilentExit>().is_some());
     }
 }

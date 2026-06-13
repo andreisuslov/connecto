@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -23,6 +24,10 @@ jobs:
             os: macos-latest
             archive: tar.gz
             asset_name: connecto-macos-aarch64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            archive: tar.gz
+            asset_name: connecto-x86_64-unknown-linux-gnu
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             archive: zip
@@ -30,6 +35,29 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Verify and stamp version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
+            echo "Not a tag build; skipping version guard and stamping."
+            exit 0
+          fi
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          CARGO_VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+          if [[ "$CARGO_VERSION" != "$VERSION" ]]; then
+            echo "::error::Tag v$VERSION does not match Cargo.toml workspace version $CARGO_VERSION. Bump the workspace version before tagging."
+            exit 1
+          fi
+          # Build-time stamping of the remaining version sources.
+          sed -i.bak -E "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" connecto_gui/package.json
+          # Root "version" (line 3) and packages."".version (line 9) only;
+          # dependency entries further down must not be touched.
+          sed -i.bak -E "1,10s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" connecto_gui/package-lock.json
+          sed -i.bak -E "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" connecto_gui/tauri.conf.json
+          sed -i.bak -E "s|<version>[^<]*</version>|<version>$VERSION</version>|" packaging/chocolatey/connecto.nuspec
+          rm -f connecto_gui/package.json.bak connecto_gui/package-lock.json.bak connecto_gui/tauri.conf.json.bak packaging/chocolatey/connecto.nuspec.bak
+          echo "Stamped version $VERSION into package.json, package-lock.json, tauri.conf.json, and connecto.nuspec."
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -68,6 +96,7 @@ jobs:
   release:
     name: Create Release
     needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write

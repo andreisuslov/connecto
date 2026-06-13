@@ -2,12 +2,9 @@
 
 use anyhow::Result;
 use colored::Colorize;
-use connecto_core::{
-    discovery::get_hostname,
-    keys::{KeyAlgorithm, KeyManager, SshKeyPair},
-};
+use connecto_core::{keys::KeyManager, Config};
 
-use super::{info, success, warn};
+use super::{info, resolve_key_pair, success};
 
 pub async fn run(name: String, comment: Option<String>, rsa: bool) -> Result<()> {
     println!();
@@ -17,28 +14,12 @@ pub async fn run(name: String, comment: Option<String>, rsa: bool) -> Result<()>
     );
     println!();
 
-    // Determine algorithm
-    let algorithm = if rsa {
-        warn("Using RSA-4096 (Ed25519 is recommended for better security and performance)");
-        KeyAlgorithm::Rsa4096
-    } else {
-        info("Using Ed25519 (modern, secure, fast)");
-        KeyAlgorithm::Ed25519
-    };
+    // keygen always generates a fresh key, so it deliberately passes an empty
+    // config: a configured default_key must not apply here.
+    let (key_pair, _) = resolve_key_pair(None, rsa, comment.as_deref(), &Config::default())?;
 
-    // Generate comment
-    let key_comment = comment.unwrap_or_else(|| {
-        let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
-        let hostname = get_hostname();
-        format!("{}@{}", user, hostname)
-    });
-
-    info(&format!("Comment: {}", key_comment.cyan()));
+    info(&format!("Comment: {}", key_pair.comment.cyan()));
     println!();
-
-    // Generate key pair
-    info("Generating key pair...");
-    let key_pair = SshKeyPair::generate(algorithm, &key_comment)?;
 
     // Save key pair
     let key_manager = KeyManager::new()?;
@@ -86,6 +67,7 @@ pub async fn run(name: String, comment: Option<String>, rsa: bool) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use connecto_core::keys::{KeyAlgorithm, SshKeyPair};
 
     #[tokio::test]
     async fn test_key_generation() {
@@ -96,11 +78,11 @@ mod tests {
     }
 
     #[test]
-    fn test_algorithm_selection() {
-        let ed25519 = KeyAlgorithm::Ed25519;
-        let rsa = KeyAlgorithm::Rsa4096;
-
-        assert_eq!(ed25519, KeyAlgorithm::default());
-        assert_ne!(rsa, KeyAlgorithm::default());
+    fn test_run_ignores_default_key_config() {
+        // resolve_key_pair with an empty config must always generate.
+        let (key_pair, used_existing) =
+            resolve_key_pair(None, false, Some("gen@test"), &Config::default()).unwrap();
+        assert!(used_existing.is_none());
+        assert_eq!(key_pair.comment, "gen@test");
     }
 }

@@ -23,8 +23,10 @@ The `listen` command starts a pairing listener on the current machine. It:
 |--------|-------------|
 | `-p, --port <PORT>` | Port to listen on (default: 8099) |
 | `-n, --name <NAME>` | Device name to advertise (default: hostname) |
+| `--verify` | Require interactive approval of a verification code before installing a key |
 | `-c, --continuous` | Keep listening after successful pairing |
-| `--verify` | Require verification code for pairing |
+| `--adhoc` | Create an ad-hoc WiFi network (bypasses router, for isolated networks) |
+| `--bluetooth` | Enable Bluetooth Low Energy advertising (Linux only; requires a build with the `bluetooth` feature) |
 
 ## Examples
 
@@ -49,6 +51,28 @@ Local IP addresses:
 Listening for pairing requests on port 8099...
 ```
 
+### With verification (recommended on shared networks)
+
+```bash
+connecto listen --verify
+```
+
+Each pairing request must be approved before anything is installed:
+
+```
+Pairing approval required
+  • Device:      my-laptop
+  • Key comment: user@my-laptop
+  • Fingerprint: SHA256:mTiqtUQvo0mB/zDzQbxahaBBq+KJ62pV8ECXptWqzLg
+  • Code:        627765
+  Compare the code with the one shown on the pairing device.
+Approve this pairing? [y/N]
+```
+
+The code is derived from the received key material on both sides
+independently, so matching codes rule out a swapped key — see
+[Security](../reference/security.md).
+
 ### Custom name and port
 
 ```bash
@@ -63,13 +87,47 @@ Keep listening for multiple pairings:
 connecto listen --continuous
 ```
 
+### Ad-hoc WiFi network
+
+On networks with client isolation (devices can't see each other), `--adhoc`
+creates a direct device-to-device WiFi network:
+
+```bash
+connecto listen --adhoc
+```
+
+Platform notes:
+
+- **macOS**: modern macOS (14.4 and later) cannot create ad-hoc networks from
+  the command line at all — Apple turned the `airport` utility into a no-op.
+  Connecto detects this and fails fast with instructions for creating the
+  network manually (Option-click the WiFi menu → Create Network).
+- **Linux**: uses `nmcli` (with an `iw` fallback).
+- **Windows**: uses `netsh wlan hostednetwork` (requires Administrator); the
+  network password is printed.
+
+Your previous WiFi network and DHCP configuration are restored when the
+listener exits, including on Ctrl+C.
+
 ## What happens during pairing
 
-1. Client connects and sends their public key
-2. Listener adds the key to `~/.ssh/authorized_keys`
-3. Listener sends back its hostname and username
-4. Both sides confirm success
-5. Listener exits (or continues if `--continuous`)
+1. Client connects and the two sides negotiate a protocol version
+2. Client sends its public key
+3. The listener validates the key and derives its fingerprint and 6-digit
+   verification code
+4. With `--verify`, the listener prompts for approval — nothing is installed
+   if you decline. Without `--verify`, the key is installed automatically and
+   the fingerprint/code of what was installed are printed.
+5. Listener adds the key to `~/.ssh/authorized_keys` and sends back its
+   username
+6. Listener exits (or continues if `--continuous`)
+
+If the final confirmation cannot be delivered after the key was installed,
+the listener rolls the installation back. Probe connections (e.g. from
+`connecto scan`) do not consume the one-shot session — the listener keeps
+waiting until a pairing actually completes.
+
+See [Protocol](../reference/protocol.md) for the full message flow.
 
 ## VPN/Cross-Subnet Detection
 
@@ -86,7 +144,14 @@ VPN/Cross-subnet connection detected!
 
 ## Security notes
 
+- **Without `--verify`, any device on the network that completes the
+  handshake gets its key installed.** Use `--verify` on any network with
+  untrusted devices — see [Security](../reference/security.md).
 - Only run `listen` when you intend to pair
 - The listener only accepts SSH public keys (not arbitrary data)
-- Keys are added to `authorized_keys` with a comment identifying Connecto
 - Stop the listener when done to prevent unwanted pairings
+
+## Exit status
+
+Like all connecto commands, `listen` exits non-zero when it fails (e.g. the
+port cannot be bound), so it is safe to use in scripts.

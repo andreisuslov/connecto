@@ -51,11 +51,14 @@ Output:
 ✓ Removed subnet: 10.0.2.0/24
 ```
 
+If the subnet was not in the config, the command says so and exits non-zero.
+
 ---
 
 ## set-default-key
 
-Set a default SSH key to use for all pairings.
+Set a default SSH key to use for all pairings (`connecto pair` and
+`connecto sync`).
 
 ```bash
 connecto config set-default-key ~/.ssh/id_ed25519
@@ -67,10 +70,16 @@ Output:
   → All future pairings will use this key.
 ```
 
+Both the private key and its `.pub` file must exist; otherwise the command
+fails with a non-zero exit status.
+
 This is useful when you want to:
 - Reuse your existing SSH key across all devices
 - Use a single key for easier management
 - Avoid generating multiple Connecto-specific keys
+
+Note: `connecto unpair` never deletes keys that don't follow the
+`connecto_*` naming convention, so your personal default key is safe.
 
 ---
 
@@ -92,7 +101,7 @@ Output:
 
 ## list
 
-Show all configured subnets.
+Show all configuration (saved subnets and the default key, if set).
 
 ```bash
 connecto config list
@@ -104,6 +113,9 @@ Configured subnets:
   • 10.0.2.0/24
   • 10.0.3.0/24
   • 192.168.100.0/24
+
+Default SSH key:
+  • /Users/john/.ssh/id_ed25519
 ```
 
 ---
@@ -118,16 +130,16 @@ connecto config path
 
 Output:
 ```
-Config file: /Users/john/.config/connecto/config.json
+/Users/john/Library/Application Support/com.connecto.connecto/config.json
 ```
 
 ### Config file locations
 
 | Platform | Path |
 |----------|------|
-| macOS | `~/.config/connecto/config.json` |
+| macOS | `~/Library/Application Support/com.connecto.connecto/config.json` |
 | Linux | `~/.config/connecto/config.json` |
-| Windows | `%APPDATA%\connecto\config.json` |
+| Windows | `%APPDATA%\connecto\connecto\config\config.json` |
 
 ---
 

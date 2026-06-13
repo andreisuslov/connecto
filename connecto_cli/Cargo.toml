@@ -9,11 +9,15 @@ description = "CLI interface for Connecto"
 name = "connecto"
 path = "src/main.rs"
 
+[features]
+default = []
+bluetooth = ["connecto_core/bluetooth"]
+
 [dependencies]
 connecto_core = { path = "../connecto_core" }
 tokio = { workspace = true }
 clap = { workspace = true }
-clap_complete = "4.4"
+clap_complete = { workspace = true }
 colored = { workspace = true }
 dialoguer = { workspace = true }
 indicatif = { workspace = true }
@@ -25,7 +29,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

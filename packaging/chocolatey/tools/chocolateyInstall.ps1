@@ -1,10 +1,14 @@
 $ErrorActionPreference = 'Stop'
 
 $packageName   = 'connecto'
-$version       = '0.3.0'
+# Derived from the package metadata (connecto.nuspec <version>), so the
+# download URL always matches the version being installed.
+$version       = $env:ChocolateyPackageVersion
 $toolsDir      = "$(Split-Path -parent $MyInvocation.MyCommand.Definition)"
 $url64         = "https://github.com/andreisuslov/connecto/releases/download/v$version/connecto-windows-x86_64.zip"
-$checksum      = 'c88870df1f446b1815d06d699ac6d5c5f2b7da1c9d53eb89e147313308519a27'
+# SHA-256 of the release zip above. Must be updated for every release before
+# packing; see packaging/chocolatey/README.md for the exact commands.
+$checksum      = 'REPLACE_WITH_CONNECTO_WINDOWS_X86_64_ZIP_SHA256'
 $checksumType  = 'sha256'
 
 $packageArgs = @{

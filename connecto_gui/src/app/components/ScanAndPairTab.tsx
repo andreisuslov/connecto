@@ -41,6 +41,18 @@ interface SyncResult {
   error: string | null;
 }
 
+interface SyncStatus {
+  is_syncing: boolean;
+  status_message: string;
+  phase: string;
+  peer_name: string | null;
+}
+
+/// Stable identity for a discovered device, independent of scan order
+function deviceKey(device: Pick<DeviceInfo, 'name' | 'addresses' | 'port'>): string {
+  return `${device.name}@${device.addresses[0] ?? ''}:${device.port}`;
+}
+
 interface PairedHost {
   host: string;
   hostname: string;
@@ -52,8 +64,11 @@ export function ScanAndPairTab() {
   const [isScanning, setIsScanning] = useState(false);
   const [manualIp, setManualIp] = useState('');
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
-  const [pairingIndex, setPairingIndex] = useState<number | null>(null);
-  const [pairedIndices, setPairedIndices] = useState<Set<number>>(new Set());
+  // Track the device currently being paired and the set of paired devices by
+  // STABLE identity (deviceKey), not positional scan index, so badges and
+  // disabled buttons stay attached to the right device across re-scans.
+  const [pairingKey, setPairingKey] = useState<string | null>(null);
+  const [pairedKeys, setPairedKeys] = useState<Set<string>>(new Set());
   const [pairingResult, setPairingResult] = useState<PairingResult | null>(null);
   const [pairedHosts, setPairedHosts] = useState<PairedHost[]>([]);
 
@@ -62,11 +77,48 @@ export function ScanAndPairTab() {
   const [syncTimeout, setSyncTimeout] = useState('60');
   const [syncUseRsa, setSyncUseRsa] = useState(false);
   const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
+  const [syncStatusMessage, setSyncStatusMessage] = useState('');
 
-  // Load paired hosts on mount
+  // Load paired hosts and rediscover any in-flight sync on mount. Radix
+  // unmounts inactive tabs, so a sync started before a tab switch would
+  // otherwise be invisible (and uncancellable) after returning here.
   useEffect(() => {
     loadPairedHosts();
+    restoreSyncStatus();
   }, []);
+
+  // Poll real sync progress from the backend while a sync is running. Also
+  // detect when the backend sync has ended (e.g. it completed/timed out while
+  // this tab was unmounted) and flip the UI back out of the syncing state.
+  useEffect(() => {
+    if (!isSyncing) return;
+    const interval = setInterval(async () => {
+      try {
+        const status = await invoke<SyncStatus>('get_sync_status');
+        if (status.status_message) {
+          setSyncStatusMessage(status.status_message);
+        }
+        if (!status.is_syncing) {
+          setIsSyncing(false);
+        }
+      } catch (error) {
+        console.error('Failed to poll sync status:', error);
+      }
+    }, 500);
+    return () => clearInterval(interval);
+  }, [isSyncing]);
+
+  const restoreSyncStatus = async () => {
+    try {
+      const status = await invoke<SyncStatus>('get_sync_status');
+      if (status.is_syncing) {
+        setIsSyncing(true);
+        setSyncStatusMessage(status.status_message);
+      }
+    } catch (error) {
+      console.error('Failed to restore sync status:', error);
+    }
+  };
 
   const loadPairedHosts = async () => {
     try {
@@ -84,6 +136,18 @@ export function ScanAndPairTab() {
     try {
       const result = await invoke<DeviceInfo[]>('scan_devices', { timeoutSecs: 5 });
       setDevices(result);
+      // Recompute paired state for the fresh result set: a device counts as
+      // paired if one of its addresses already has an SSH config entry. This
+      // keeps "Paired" attached to the right machine after a re-scan.
+      const hosts = await invoke<PairedHost[]>('list_paired_hosts');
+      const pairedHostnames = new Set(hosts.map((h) => h.hostname));
+      setPairedKeys(
+        new Set(
+          result
+            .filter((d) => d.addresses.some((a) => pairedHostnames.has(a)))
+            .map(deviceKey)
+        )
+      );
       if (result.length === 0) {
         toast.warning('No devices found on your network');
       } else {
@@ -97,18 +161,31 @@ export function ScanAndPairTab() {
   };
 
   const handlePair = async (device: DeviceInfo) => {
-    setPairingIndex(device.index);
+    const key = deviceKey(device);
+    setPairingKey(key);
     toast.loading(`Pairing with ${extractName(device.name)}...`, { id: 'pairing' });
 
+    // Pair by the device's own address rather than an index into the backend's
+    // mutable scan cache, so a concurrent re-scan cannot redirect the pairing
+    // to a different machine.
+    const address = device.addresses[0]
+      ? `${device.addresses[0]}:${device.port}`
+      : null;
+    if (!address) {
+      toast.error('Device has no IP address', { id: 'pairing' });
+      setPairingKey(null);
+      return;
+    }
+
     try {
-      const result = await invoke<PairingResult>('pair_with_device', {
-        deviceIndex: device.index,
+      const result = await invoke<PairingResult>('pair_with_address', {
+        address,
         useRsa: false,
         customComment: null
       });
 
       if (result.success) {
-        setPairedIndices(prev => new Set(prev).add(device.index));
+        setPairedKeys(prev => new Set(prev).add(key));
         setPairingResult(result);
         loadPairedHosts();
         toast.success(`Successfully paired with ${result.server_name}!`, { id: 'pairing' });
@@ -118,7 +195,7 @@ export function ScanAndPairTab() {
     } catch (error) {
       toast.error(`Pairing failed: ${error}`, { id: 'pairing' });
     } finally {
-      setPairingIndex(null);
+      setPairingKey(null);
     }
   };
 
@@ -158,6 +235,7 @@ export function ScanAndPairTab() {
   const handleStartSync = async () => {
     setIsSyncing(true);
     setSyncResult(null);
+    setSyncStatusMessage('');
     toast.loading('Starting sync - waiting for peer...', { id: 'sync' });
 
     try {
@@ -234,9 +312,13 @@ export function ScanAndPairTab() {
                 No devices found. Click "Scan network" to search.
               </p>
             ) : (
-              devices.map((device) => (
+              devices.map((device) => {
+                const key = deviceKey(device);
+                const isPaired = pairedKeys.has(key);
+                const isPairing = pairingKey === key;
+                return (
                 <div
-                  key={device.index}
+                  key={key}
                   className="flex items-center justify-between p-4 border rounded-lg hover:bg-gray-50 transition-colors"
                 >
                   <div className="flex items-center gap-4">
@@ -246,7 +328,7 @@ export function ScanAndPairTab() {
                     <div>
                       <div className="flex items-center gap-2">
                         <p className="font-medium">{extractName(device.name)}</p>
-                        {pairedIndices.has(device.index) && (
+                        {isPaired && (
                           <Badge variant="default" className="bg-green-600">
                             <CheckCircle2 className="mr-1 size-3" />
                             Paired
@@ -260,16 +342,17 @@ export function ScanAndPairTab() {
                   </div>
                   <Button
                     onClick={() => handlePair(device)}
-                    disabled={pairingIndex === device.index || pairedIndices.has(device.index)}
-                    variant={pairedIndices.has(device.index) ? 'outline' : 'default'}
+                    disabled={isPairing || isPaired}
+                    variant={isPaired ? 'outline' : 'default'}
                   >
-                    {pairingIndex === device.index && (
+                    {isPairing && (
                       <Loader2 className="mr-2 size-4 animate-spin" />
                     )}
-                    {pairedIndices.has(device.index) ? 'Paired' : pairingIndex === device.index ? 'Pairing...' : 'Pair'}
+                    {isPaired ? 'Paired' : isPairing ? 'Pairing...' : 'Pair'}
                   </Button>
                 </div>
-              ))
+                );
+              })
             )}
           </div>
         </CardContent>
@@ -377,7 +460,9 @@ export function ScanAndPairTab() {
                         <RefreshCw className="size-5 text-purple-600 animate-spin" />
                         <div>
                           <p className="font-medium text-purple-900">Syncing...</p>
-                          <p className="text-sm text-purple-700">Waiting for peer on network</p>
+                          <p className="text-sm text-purple-700">
+                            {syncStatusMessage || 'Waiting for peer on network'}
+                          </p>
                         </div>
                       </div>
                       <Button variant="destructive" size="sm" onClick={handleCancelSync}>

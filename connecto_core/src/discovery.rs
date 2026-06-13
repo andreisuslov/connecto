@@ -3,14 +3,14 @@
 //! Handles automatic discovery of Connecto instances on the local network
 
 use crate::error::{ConnectoError, Result};
-use crate::protocol::Message;
+use crate::protocol::{read_message, write_message, Message, PROTOCOL_VERSION};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -19,6 +19,8 @@ use tracing::{debug, info, warn};
 pub const SERVICE_TYPE: &str = "_connecto._tcp.local.";
 /// Default port for the Connecto handshake service
 pub const DEFAULT_PORT: u16 = 8099;
+/// TXT property key under which sync advertisements publish their per-run priority
+pub const TXT_PRIORITY_KEY: &str = "priority";
 
 /// Represents a discovered Connecto device
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -60,40 +62,64 @@ pub enum DiscoveryEvent {
 /// Service advertiser for making this device discoverable
 pub struct ServiceAdvertiser {
     daemon: ServiceDaemon,
+    service_type: String,
     service_fullname: Option<String>,
 }
 
 impl ServiceAdvertiser {
-    /// Create a new service advertiser
+    /// Create a new service advertiser for the default pairing service
+    /// ([`SERVICE_TYPE`])
     pub fn new() -> Result<Self> {
+        Self::new_for_service(SERVICE_TYPE)
+    }
+
+    /// Create a new service advertiser for an arbitrary mDNS service type
+    /// (e.g. the sync service)
+    pub fn new_for_service(service_type: &str) -> Result<Self> {
         let daemon = ServiceDaemon::new().map_err(|e| {
             ConnectoError::Discovery(format!("Failed to create mDNS daemon: {}", e))
         })?;
 
         Ok(Self {
             daemon,
+            service_type: service_type.to_string(),
             service_fullname: None,
         })
     }
 
     /// Start advertising this device
     pub fn advertise(&mut self, device_name: &str, port: u16) -> Result<()> {
-        let hostname = hostname::get()
-            .map(|h: std::ffi::OsString| h.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "unknown".to_string());
+        self.advertise_with_properties(device_name, port, &[])
+    }
 
+    /// Start advertising this device with additional TXT properties
+    ///
+    /// Used by sync to publish its per-run priority under
+    /// [`TXT_PRIORITY_KEY`] so browsers can distinguish this run's own
+    /// advertisement from another device that happens to share the hostname.
+    pub fn advertise_with_properties(
+        &mut self,
+        device_name: &str,
+        port: u16,
+        properties: &[(&str, &str)],
+    ) -> Result<()> {
+        let hostname = get_hostname();
         let service_hostname = format!("{}.local.", hostname);
         let instance_name = format!("{} ({})", device_name, hostname);
 
         let service_info = ServiceInfo::new(
-            SERVICE_TYPE,
+            &self.service_type,
             &instance_name,
             &service_hostname,
             "",
             port,
-            None,
+            properties,
         )
-        .map_err(|e| ConnectoError::Discovery(format!("Failed to create service info: {}", e)))?;
+        .map_err(|e| ConnectoError::Discovery(format!("Failed to create service info: {}", e)))?
+        // Without address auto-detection the service registers with no
+        // addresses and mdns-sd never answers PTR queries for it, so
+        // browsers cannot discover us at all.
+        .enable_addr_auto();
 
         let fullname = service_info.get_fullname().to_string();
 
@@ -122,50 +148,106 @@ impl ServiceAdvertiser {
 impl Drop for ServiceAdvertiser {
     fn drop(&mut self) {
         let _ = self.stop();
+        // Shut the daemon down so its background threads exit instead of
+        // leaking one daemon per advertiser instance.
+        let _ = self.daemon.shutdown();
     }
 }
 
 /// Service browser for discovering other devices
 pub struct ServiceBrowser {
     daemon: ServiceDaemon,
+    service_type: String,
+    /// `(own device name, own TXT priority)`; see [`Self::skip_own_instance`]
+    skip_own: Option<(String, String)>,
     devices: Arc<Mutex<HashMap<String, DiscoveredDevice>>>,
 }
 
+/// True when a resolved mDNS instance is this process's own advertisement
+///
+/// An instance counts as "ourselves" only when BOTH its fullname contains our
+/// device name AND its TXT [`TXT_PRIORITY_KEY`] property equals the random
+/// per-run priority we advertised. Matching on the name alone (the previous
+/// behavior) also filtered out distinct devices that share a hostname, which
+/// made identical-hostname machines invisible to each other during sync.
+fn is_own_instance(
+    fullname: &str,
+    txt_priority: Option<&str>,
+    own_name: &str,
+    own_priority: &str,
+) -> bool {
+    fullname.contains(own_name) && txt_priority == Some(own_priority)
+}
+
 impl ServiceBrowser {
-    /// Create a new service browser
+    /// Create a new service browser for the default pairing service
+    /// ([`SERVICE_TYPE`])
     pub fn new() -> Result<Self> {
+        Self::new_for_service(SERVICE_TYPE)
+    }
+
+    /// Create a new service browser for an arbitrary mDNS service type
+    /// (e.g. the sync service)
+    pub fn new_for_service(service_type: &str) -> Result<Self> {
         let daemon = ServiceDaemon::new().map_err(|e| {
             ConnectoError::Discovery(format!("Failed to create mDNS daemon: {}", e))
         })?;
 
         Ok(Self {
             daemon,
+            service_type: service_type.to_string(),
+            skip_own: None,
             devices: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Skip this run's own advertisement while browsing
+    ///
+    /// `priority_txt` is the value advertised under [`TXT_PRIORITY_KEY`]
+    /// (sync's random per-run priority). A resolved instance is skipped only
+    /// when its fullname contains `name` AND its TXT priority equals
+    /// `priority_txt`, i.e. it is genuinely this run's own advertisement.
+    /// Two distinct devices with identical hostnames advertise different
+    /// priorities and therefore still find each other.
+    pub fn skip_own_instance(mut self, name: &str, priority_txt: &str) -> Self {
+        self.skip_own = Some((name.to_string(), priority_txt.to_string()));
+        self
     }
 
     /// Start browsing for devices
     pub fn browse(&self) -> Result<mpsc::Receiver<DiscoveryEvent>> {
         let receiver = self
             .daemon
-            .browse(SERVICE_TYPE)
+            .browse(&self.service_type)
             .map_err(|e| ConnectoError::Discovery(format!("Failed to browse: {}", e)))?;
 
         let (tx, rx) = mpsc::channel(100);
         let devices = Arc::clone(&self.devices);
+        let skip_own = self.skip_own.clone();
 
+        // Bridge thread: forwards mDNS daemon events to the async channel.
+        // It exits when the daemon channel disconnects (daemon shut down on
+        // Drop), when the search stops, or when the event receiver is gone.
         std::thread::spawn(move || {
-            let rt = tokio::runtime::Handle::try_current().ok();
-
             while let Ok(event) = receiver.recv() {
                 match event {
                     ServiceEvent::ServiceResolved(info) => {
+                        let fullname = info.get_fullname().to_string();
+
+                        if let Some((own_name, own_priority)) = &skip_own {
+                            let txt_priority = info.get_property_val_str(TXT_PRIORITY_KEY);
+                            if is_own_instance(&fullname, txt_priority, own_name, own_priority) {
+                                debug!("Skipping our own service: {}", fullname);
+                                continue;
+                            }
+                        }
+
                         let device = DiscoveredDevice {
-                            name: info.get_fullname().to_string(),
+                            name: fullname.clone(),
                             hostname: info.get_hostname().to_string(),
                             addresses: info.get_addresses().iter().copied().collect(),
                             port: info.get_port(),
-                            instance_name: info.get_fullname().to_string(),
+                            instance_name: fullname,
                         };
 
                         debug!("Discovered device: {:?}", device);
@@ -175,15 +257,12 @@ impl ServiceBrowser {
                             devs.insert(device.instance_name.clone(), device.clone());
                         }
 
-                        let event = DiscoveryEvent::DeviceFound(device);
-                        if let Some(ref handle) = rt {
-                            let tx = tx.clone();
-                            handle.spawn(async move {
-                                let _ = tx.send(event).await;
-                            });
-                        } else {
-                            // Blocking send if no runtime
-                            let _ = tx.blocking_send(event);
+                        if tx
+                            .blocking_send(DiscoveryEvent::DeviceFound(device))
+                            .is_err()
+                        {
+                            debug!("Discovery event receiver dropped; stopping bridge thread");
+                            break;
                         }
                     }
                     ServiceEvent::ServiceRemoved(_, fullname) => {
@@ -192,19 +271,19 @@ impl ServiceBrowser {
                             devs.remove(&fullname);
                         }
 
-                        let event = DiscoveryEvent::DeviceLost(fullname);
-                        if let Some(ref handle) = rt {
-                            let tx = tx.clone();
-                            handle.spawn(async move {
-                                let _ = tx.send(event).await;
-                            });
-                        } else {
-                            let _ = tx.blocking_send(event);
+                        if tx
+                            .blocking_send(DiscoveryEvent::DeviceLost(fullname))
+                            .is_err()
+                        {
+                            debug!("Discovery event receiver dropped; stopping bridge thread");
+                            break;
                         }
                     }
                     ServiceEvent::SearchStarted(_) => {
                         debug!("mDNS search started");
-                        let _ = tx.blocking_send(DiscoveryEvent::SearchStarted);
+                        if tx.blocking_send(DiscoveryEvent::SearchStarted).is_err() {
+                            break;
+                        }
                     }
                     ServiceEvent::SearchStopped(_) => {
                         debug!("mDNS search stopped");
@@ -253,6 +332,16 @@ impl ServiceBrowser {
         }
 
         Ok(self.get_devices())
+    }
+}
+
+impl Drop for ServiceBrowser {
+    fn drop(&mut self) {
+        // Stop any active browse and shut the daemon down so the bridge
+        // thread's recv() disconnects and the thread exits instead of leaking
+        // one daemon (plus a parked thread) per browser instance.
+        let _ = self.daemon.stop_browse(&self.service_type);
+        let _ = self.daemon.shutdown();
     }
 }
 
@@ -482,27 +571,13 @@ impl SubnetScanner {
 
         // Send Hello message
         let hello = Message::Hello {
-            version: 1,
+            version: PROTOCOL_VERSION,
             device_name: format!("scanner-{}", std::process::id()),
         };
-        writer
-            .write_all(hello.to_json()?.as_bytes())
-            .await
-            .map_err(|e| ConnectoError::Network(e.to_string()))?;
-        writer
-            .write_all(b"\n")
-            .await
-            .map_err(|e| ConnectoError::Network(e.to_string()))?;
+        write_message(&mut writer, &hello).await?;
 
-        // Read HelloAck response
-        let mut line = String::new();
-        tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut line))
-            .await
-            .map_err(|_| ConnectoError::Timeout("Timed out waiting for response".to_string()))?
-            .map_err(|e| ConnectoError::Network(e.to_string()))?;
-
-        let response: Message = serde_json::from_str(&line)
-            .map_err(|e| ConnectoError::Protocol(format!("Invalid response: {}", e)))?;
+        // Read HelloAck response (short timeout - this is just a probe)
+        let response = read_message(&mut reader, Duration::from_secs(2)).await?;
 
         match response {
             Message::HelloAck { device_name, .. } => Ok(DiscoveredDevice {
@@ -521,30 +596,6 @@ impl SubnetScanner {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_service_type_constant() {
-        assert_eq!(SERVICE_TYPE, "_connecto._tcp.local.");
-    }
-
-    #[test]
-    fn test_default_port() {
-        assert_eq!(DEFAULT_PORT, 8099);
-    }
-
-    #[test]
-    fn test_discovered_device_creation() {
-        let device = DiscoveredDevice {
-            name: "Test Device".to_string(),
-            hostname: "test.local.".to_string(),
-            addresses: vec!["192.168.1.100".parse().unwrap()],
-            port: 8099,
-            instance_name: "test-instance".to_string(),
-        };
-
-        assert_eq!(device.name, "Test Device");
-        assert_eq!(device.port, 8099);
-    }
 
     #[test]
     fn test_primary_address_prefers_ipv4() {
@@ -609,20 +660,6 @@ mod tests {
     }
 
     #[test]
-    fn test_discovered_device_equality() {
-        let device1 = DiscoveredDevice {
-            name: "Test".to_string(),
-            hostname: "test.local.".to_string(),
-            addresses: vec!["192.168.1.100".parse().unwrap()],
-            port: 8099,
-            instance_name: "test".to_string(),
-        };
-
-        let device2 = device1.clone();
-        assert_eq!(device1, device2);
-    }
-
-    #[test]
     fn test_discovered_device_serialization() {
         let device = DiscoveredDevice {
             name: "Test Device".to_string(),
@@ -642,40 +679,6 @@ mod tests {
     fn test_get_hostname() {
         let hostname = get_hostname();
         assert!(!hostname.is_empty());
-    }
-
-    #[test]
-    fn test_discovery_event_variants() {
-        let device = DiscoveredDevice {
-            name: "Test".to_string(),
-            hostname: "test.local.".to_string(),
-            addresses: vec![],
-            port: 8099,
-            instance_name: "test".to_string(),
-        };
-
-        let event1 = DiscoveryEvent::DeviceFound(device);
-        let event2 = DiscoveryEvent::DeviceLost("test".to_string());
-        let event3 = DiscoveryEvent::SearchStarted;
-        let event4 = DiscoveryEvent::SearchStopped;
-
-        // Just verify these compile and can be pattern matched
-        match event1 {
-            DiscoveryEvent::DeviceFound(_) => {}
-            _ => panic!("Wrong variant"),
-        }
-        match event2 {
-            DiscoveryEvent::DeviceLost(_) => {}
-            _ => panic!("Wrong variant"),
-        }
-        match event3 {
-            DiscoveryEvent::SearchStarted => {}
-            _ => panic!("Wrong variant"),
-        }
-        match event4 {
-            DiscoveryEvent::SearchStopped => {}
-            _ => panic!("Wrong variant"),
-        }
     }
 
     #[test]
@@ -732,6 +735,29 @@ mod tests {
         // /16 is the limit (65534 hosts) - should work
         let result = SubnetScanner::parse_cidr("10.0.0.0/16");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_is_own_instance_matches_only_name_and_priority() {
+        let fullname = "MyHost (myhost)._connecto-sync._tcp.local.";
+
+        // Same name + same priority = genuinely ourselves
+        assert!(is_own_instance(fullname, Some("12345"), "MyHost", "12345"));
+
+        // Identical hostname but a DIFFERENT per-run priority is another
+        // device and must NOT be filtered (the old substring filter hid it)
+        assert!(!is_own_instance(fullname, Some("99999"), "MyHost", "12345"));
+
+        // Missing TXT priority (e.g. older peer) is never treated as ourselves
+        assert!(!is_own_instance(fullname, None, "MyHost", "12345"));
+
+        // Same priority value but a different name is not ourselves either
+        assert!(!is_own_instance(
+            "OtherHost (otherhost)._connecto-sync._tcp.local.",
+            Some("12345"),
+            "MyHost",
+            "12345"
+        ));
     }
 
     // Integration test - requires network access

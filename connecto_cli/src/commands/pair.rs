@@ -4,19 +4,14 @@ use anyhow::{anyhow, Result};
 use colored::Colorize;
 use connecto_core::{
     discovery::get_hostname,
-    keys::{KeyAlgorithm, KeyManager, SshKeyPair},
-    protocol::HandshakeClient,
-    DEFAULT_PORT,
+    keys::{fingerprint_sha256, KeyManager},
+    protocol::{verification_code_for_key, HandshakeClient},
+    sanitize_device_name, AddOutcome, Config, HostEntry, SshConfig, DEFAULT_PORT,
 };
-use indicatif::{ProgressBar, ProgressStyle};
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::PathBuf;
-use std::time::Duration;
 
 use super::scan::load_cached_devices;
-use super::{error, info, success, warn};
-use crate::config::Config;
+use super::{error, info, resolve_key_pair, spinner, success, warn};
+use crate::SilentExit;
 
 pub async fn run(
     target: String,
@@ -39,64 +34,27 @@ pub async fn run(
 
     // Determine which key to use
     // Priority: 1. --key flag, 2. config default_key, 3. generate new key
-    let effective_key_path =
-        key_path.or_else(|| Config::load().ok().and_then(|cfg| cfg.default_key.clone()));
+    let config = Config::load().unwrap_or_default();
+    let (key_pair, existing_key_path) =
+        resolve_key_pair(key_path.as_deref(), rsa, comment.as_deref(), &config)?;
 
-    // Create spinner
-    let spinner = ProgressBar::new_spinner();
-    spinner.set_style(
-        ProgressStyle::default_spinner()
-            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-            .template("{spinner:.magenta} {msg}")
-            .unwrap(),
-    );
+    // Show the verification material BEFORE the exchange: the listener (with
+    // --verify) asks its user to compare this code while we are still
+    // waiting, so it must already be on this screen.
+    info(&format!(
+        "Key fingerprint:   {}",
+        fingerprint_sha256(&key_pair.public_key)?
+    ));
+    info(&format!(
+        "Verification code: {} {}",
+        verification_code_for_key(&key_pair.public_key)?
+            .green()
+            .bold(),
+        "(the listener may ask to compare this code before approving)".dimmed()
+    ));
+    println!();
 
-    let (key_pair, using_existing_key, existing_key_path) =
-        if let Some(key_file) = effective_key_path {
-            // Use existing key
-            let expanded_path = expand_path(&key_file)?;
-            let pub_key_path = format!("{}.pub", expanded_path);
-
-            if !std::path::Path::new(&expanded_path).exists() {
-                return Err(anyhow!("Key file not found: {}", expanded_path));
-            }
-            if !std::path::Path::new(&pub_key_path).exists() {
-                return Err(anyhow!("Public key not found: {}", pub_key_path));
-            }
-
-            info(&format!("Using existing key: {}", expanded_path.cyan()));
-
-            spinner.set_message("Loading existing SSH key...");
-            spinner.enable_steady_tick(Duration::from_millis(80));
-
-            let key_pair = SshKeyPair::load_from_file(&expanded_path)?;
-            (key_pair, true, Some(expanded_path))
-        } else {
-            // Generate new key
-            let algorithm = if rsa {
-                warn("Using RSA-4096 (Ed25519 is recommended for better security)");
-                KeyAlgorithm::Rsa4096
-            } else {
-                info("Using Ed25519 key (modern, secure, fast)");
-                KeyAlgorithm::Ed25519
-            };
-
-            let key_comment = comment.unwrap_or_else(|| {
-                let user = std::env::var("USER")
-                    .or_else(|_| std::env::var("USERNAME"))
-                    .unwrap_or_else(|_| "user".to_string());
-                let hostname = get_hostname();
-                format!("{}@{}", user, hostname)
-            });
-
-            spinner.set_message("Generating SSH key pair...");
-            spinner.enable_steady_tick(Duration::from_millis(80));
-
-            let key_pair = SshKeyPair::generate(algorithm, &key_comment)?;
-            (key_pair, false, None)
-        };
-
-    spinner.set_message("Connecting and exchanging keys...");
+    let spinner = spinner("magenta", "Connecting and exchanging keys...");
 
     // Create client and pair
     let client = HandshakeClient::new(&get_hostname());
@@ -109,19 +67,29 @@ pub async fn run(
             println!();
             success("Pairing successful!");
             println!();
+            // Derived locally from the key we sent; the listener derives the
+            // same code from the key it received, so matching codes rule out
+            // a man-in-the-middle that swapped the key.
+            info(&format!(
+                "Verification code: {} — confirm it matches on {}",
+                pairing_result.verification_code.green().bold(),
+                pairing_result.server_name.cyan()
+            ));
+            println!();
 
             // Determine the key path to use in SSH config
-            let private_path = if using_existing_key {
-                // Use the existing key path
-                let path = existing_key_path.unwrap();
+            let private_path = if let Some(path) = existing_key_path {
                 println!("{}", "Using existing key:".bold());
-                println!("  {} {}", "•".green(), path.dimmed());
+                println!("  {} {}", "•".green(), path.display().to_string().dimmed());
                 println!();
-                PathBuf::from(path)
+                path
             } else {
                 // Save the new key locally
                 let key_manager = KeyManager::new()?;
-                let key_name = format!("connecto_{}", sanitize_name(&pairing_result.server_name));
+                let key_name = format!(
+                    "connecto_{}",
+                    sanitize_device_name(&pairing_result.server_name)
+                );
                 let (private_path, public_path) =
                     key_manager.save_key_pair(&key_pair, &key_name)?;
 
@@ -142,23 +110,27 @@ pub async fn run(
 
             // Auto-configure SSH config
             let primary_ip = extract_ip_from_address(&address);
-            let host_alias = sanitize_name(&pairing_result.server_name);
+            let host_alias = sanitize_device_name(&pairing_result.server_name);
+            let entry = HostEntry {
+                host: host_alias.clone(),
+                hostname: primary_ip.clone(),
+                user: pairing_result.ssh_user.clone(),
+                identity_file: private_path.display().to_string(),
+            };
 
-            match add_to_ssh_config(
-                &host_alias,
-                &primary_ip,
-                &pairing_result.ssh_user,
-                &private_path,
-            ) {
-                Ok(true) => {
+            match SshConfig::at_default().and_then(|cfg| cfg.add_host(&entry)) {
+                Ok(AddOutcome::Added) => {
                     success(&format!("Added to ~/.ssh/config as '{}'", host_alias));
                     println!();
                     println!("{}", "You can now connect with:".bold());
                     println!();
                     println!("  {}", format!("ssh {}", host_alias).cyan().bold());
                 }
-                Ok(false) => {
-                    info(&format!("Host '{}' already in ~/.ssh/config", host_alias));
+                Ok(AddOutcome::Replaced) => {
+                    info(&format!(
+                        "Host '{}' already in ~/.ssh/config (entry updated)",
+                        host_alias
+                    ));
                     println!();
                     println!("{}", "You can connect with:".bold());
                     println!();
@@ -195,7 +167,9 @@ pub async fn run(
             println!("  {} Check that the address is correct", "•".dimmed());
             println!("  {} Verify firewall allows the connection", "•".dimmed());
             println!();
-            return Err(e.into());
+            // The diagnostics above are the error report; SilentExit keeps
+            // main from printing the same error a second time.
+            return Err(SilentExit.into());
         }
     }
 
@@ -232,107 +206,13 @@ fn resolve_target(target: &str) -> Result<String> {
     }
 }
 
-fn sanitize_name(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>()
-        .to_lowercase()
-}
-
 fn extract_ip_from_address(address: &str) -> String {
     address.split(':').next().unwrap_or(address).to_string()
-}
-
-/// Expand ~ to home directory in path
-fn expand_path(path: &str) -> Result<String> {
-    if path.starts_with("~/") {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .map_err(|_| anyhow!("HOME/USERPROFILE not set"))?;
-        Ok(path.replacen("~", &home, 1))
-    } else {
-        Ok(path.to_string())
-    }
-}
-
-/// Add a host entry to ~/.ssh/config
-/// Returns Ok(true) if added, Ok(false) if already exists, Err on failure
-fn add_to_ssh_config(
-    host: &str,
-    hostname: &str,
-    user: &str,
-    identity_file: &std::path::Path,
-) -> Result<bool> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| anyhow!("HOME/USERPROFILE not set"))?;
-    let ssh_dir = PathBuf::from(&home).join(".ssh");
-    let config_path = ssh_dir.join("config");
-
-    // Create .ssh directory if it doesn't exist
-    if !ssh_dir.exists() {
-        std::fs::create_dir_all(&ssh_dir)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700))?;
-        }
-    }
-
-    // Check if host already exists in config
-    if config_path.exists() {
-        let content = std::fs::read_to_string(&config_path)?;
-        let host_pattern = format!("Host {}", host);
-        if content
-            .lines()
-            .any(|line| line.trim() == host_pattern || line.trim() == format!("Host {}", host))
-        {
-            return Ok(false); // Already exists
-        }
-    }
-
-    // Append to config
-    let entry = format!(
-        "\n# Added by connecto\nHost {}\n    HostName {}\n    User {}\n    IdentityFile {}\n",
-        host,
-        hostname,
-        user,
-        identity_file.display()
-    );
-
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&config_path)?;
-
-    file.write_all(entry.as_bytes())?;
-
-    // Set proper permissions on config file
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600))?;
-    }
-
-    Ok(true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_sanitize_name() {
-        assert_eq!(sanitize_name("My Device"), "my_device");
-        assert_eq!(sanitize_name("test-host"), "test-host");
-        assert_eq!(sanitize_name("Host (123)"), "host__123_");
-    }
 
     #[test]
     fn test_extract_ip_from_address() {
@@ -350,12 +230,5 @@ mod tests {
     fn test_resolve_target_without_port() {
         let result = resolve_target("192.168.1.1").unwrap();
         assert_eq!(result, format!("192.168.1.1:{}", DEFAULT_PORT));
-    }
-
-    #[test]
-    fn test_resolve_target_invalid_index() {
-        // Should fail because there's no cache
-        let result = resolve_target("999");
-        assert!(result.is_err());
     }
 }

@@ -17,7 +17,7 @@ Both devices run `connecto sync` at the same time, and they:
 1. Advertise via mDNS (`_connecto-sync._tcp.local.`)
 2. Scan for sync peers on the network
 3. When found, exchange SSH public keys
-4. Both add each other's key to `~/.ssh/authorized_keys`
+4. Both add each other's key to `~/.ssh/authorized_keys` (only after both sides confirm the exchange)
 5. Both can now SSH to each other
 
 ## Options
@@ -55,7 +55,7 @@ Output on Device A:
 Local IP addresses:
   • 192.168.1.100
 
-→ Generating Ed25519 key for sync...
+→ Using Ed25519 key (modern, secure, fast)
 → Key saved: /Users/alice/.ssh/connecto_sync_device-a
 
 Waiting for sync peer...
@@ -96,6 +96,11 @@ connecto sync --timeout 120
 connecto sync --key ~/.ssh/my_existing_key
 ```
 
+`sync` resolves keys the same way `pair` does: `--key` flag first, then the
+key configured via `connecto config set-default-key`, then a freshly
+generated key. The `~/.ssh/config` entry written for the peer always points
+at the key file that actually exists on disk.
+
 ### Using RSA instead of Ed25519
 
 ```bash
@@ -104,12 +109,26 @@ connecto sync --rsa
 
 ## How it works
 
-1. **Both devices advertise**: Each device registers a sync service via mDNS
-2. **Both devices search**: Each device also searches for other sync services
-3. **Priority determines initiator**: Each device generates a random priority; the one that connects first becomes the initiator
-4. **Key exchange**: Initiator sends `SyncHello` with its public key, responder replies with `SyncHelloAck` containing its key
-5. **Mutual installation**: Both devices add the received key to their `authorized_keys`
-6. **Confirmation**: Both send `SyncComplete` to confirm success
+1. **Both devices advertise**: each device registers a sync service via mDNS,
+   publishing a random per-run priority as a TXT property (this is also how a
+   device recognizes — and skips — its own advertisement)
+2. **Both devices search**: each device also searches for other sync services
+3. **Priority arbitration picks one direction**: whichever device connects
+   sends `SyncHello` with its priority. The responder accepts only if the
+   initiator's `(priority, device name)` pair strictly outranks its own;
+   otherwise it declines and keeps listening, knowing its own outgoing
+   attempt outranks the peer's. Exactly one direction wins, so starting
+   `connecto sync` on both devices at the same time converges instead of
+   hanging.
+4. **Key exchange**: the winning initiator's `SyncHello` carries its public
+   key; the responder replies with `SyncHelloAck` containing its own key
+5. **Confirm, then install**: both sides exchange `SyncComplete` and only
+   install the peer's key after the other side has confirmed — an aborted
+   exchange leaves no key behind
+6. **SSH config**: each side writes a connecto-managed `~/.ssh/config` entry
+   for the peer
+
+See [Protocol](../reference/protocol.md#sync-flow) for the exact message flow.
 
 ## Comparison with listen + pair
 
@@ -126,7 +145,7 @@ The sync protocol uses these message types:
 
 - **SyncHello**: Contains version, device name, priority, public key, and SSH user
 - **SyncHelloAck**: Response with the peer's public key and acceptance status
-- **SyncComplete**: Final confirmation of success or failure
+- **SyncComplete**: Final confirmation of success or failure (sent by both sides)
 
 ## Troubleshooting
 
@@ -149,7 +168,16 @@ The sync protocol uses these message types:
 
 ## Security notes
 
-- Sync only with trusted devices on your local network
+- Sync only with trusted devices on your local network — sync has no
+  equivalent of `listen --verify`, so any reachable peer that wins
+  arbitration completes the exchange
 - The sync protocol requires both parties to actively participate
-- Keys are generated fresh for each sync (unless `--key` is specified)
+- Keys are installed only after both sides confirm; a failed install on one
+  side prevents the other side from installing too
+- Keys are generated fresh for each sync (unless `--key` or a default key is
+  configured)
 - Only run sync when you intend to exchange keys with another device
+
+## Exit status
+
+`sync` exits non-zero when the sync fails or times out.

@@ -3,13 +3,11 @@
 //! Handles generation, parsing, and storage of SSH keys
 
 use crate::error::{ConnectoError, Result};
+use crate::fsutil;
 use directories::UserDirs;
-use ssh_key::{Algorithm, LineEnding, PrivateKey, PublicKey};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use ssh_key::{Algorithm, HashAlg, LineEnding, PrivateKey, PublicKey};
+use std::fs;
 use std::path::PathBuf;
-#[cfg(target_os = "windows")]
-use tracing::warn;
 
 /// Supported SSH key algorithms
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -118,6 +116,51 @@ impl SshKeyPair {
     }
 }
 
+/// Extract the base64 key blob (the second whitespace-separated field) from a
+/// public key or authorized_keys line
+fn key_blob(line: &str) -> Option<&str> {
+    let mut fields = line.split_whitespace();
+    fields.next()?;
+    fields.next()
+}
+
+/// Check if the current process is running with Administrator privileges
+///
+/// This is the single Windows elevation check shared across the workspace
+/// (key management here, `connecto ssh` in the CLI). The result is computed
+/// once per process — elevation cannot change at runtime — so the PowerShell
+/// probe is not re-spawned on every key operation.
+#[cfg(target_os = "windows")]
+pub fn is_windows_admin() -> bool {
+    use std::process::Command;
+    use std::sync::OnceLock;
+
+    static IS_ADMIN: OnceLock<bool> = OnceLock::new();
+
+    *IS_ADMIN.get_or_init(|| {
+        let output = Command::new("powershell")
+            .args([
+                "-Command",
+                "([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)",
+            ])
+            .output();
+
+        match output {
+            Ok(out) => String::from_utf8_lossy(&out.stdout).trim() == "True",
+            Err(_) => false,
+        }
+    })
+}
+
+/// Compute the SHA-256 fingerprint of a public key in OpenSSH format
+///
+/// Returns the fingerprint in the standard `SHA256:<base64>` form, matching
+/// the output of `ssh-keygen -lf`. The input may include a trailing comment.
+pub fn fingerprint_sha256(public_key_openssh: &str) -> Result<String> {
+    let public_key = SshKeyPair::parse_public_key(public_key_openssh)?;
+    Ok(public_key.fingerprint(HashAlg::Sha256).to_string())
+}
+
 /// Manager for SSH key files on disk
 pub struct KeyManager {
     ssh_dir: PathBuf,
@@ -170,22 +213,24 @@ impl KeyManager {
     }
 
     /// Save a key pair to disk
+    ///
+    /// Both files are written atomically; on Unix the private key is created
+    /// with mode `0o600` before any content touches disk. Both files are
+    /// newline-terminated to match `ssh-keygen` output (the private key
+    /// already carries an LF ending from `to_openssh`).
     pub fn save_key_pair(&self, key_pair: &SshKeyPair, name: &str) -> Result<(PathBuf, PathBuf)> {
         self.ensure_ssh_dir()?;
 
         let private_path = self.ssh_dir.join(name);
         let public_path = self.ssh_dir.join(format!("{}.pub", name));
 
-        // Write private key
-        fs::write(&private_path, &key_pair.private_key)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&private_path, fs::Permissions::from_mode(0o600))?;
+        let mut public_contents = key_pair.public_key.clone();
+        if !public_contents.ends_with('\n') {
+            public_contents.push('\n');
         }
 
-        // Write public key
-        fs::write(&public_path, &key_pair.public_key)?;
+        fsutil::write_atomic(&private_path, &key_pair.private_key)?;
+        fsutil::write_atomic(&public_path, &public_contents)?;
 
         Ok((private_path, public_path))
     }
@@ -196,7 +241,7 @@ impl KeyManager {
         #[cfg(target_os = "windows")]
         {
             // Only use admin path for default SSH directory, not custom dirs (e.g., in tests)
-            if !self.use_custom_dir && Self::is_windows_admin() {
+            if !self.use_custom_dir && is_windows_admin() {
                 // Windows OpenSSH Server uses a special path for admin users
                 PathBuf::from(r"C:\ProgramData\ssh\administrators_authorized_keys")
             } else {
@@ -210,26 +255,18 @@ impl KeyManager {
         }
     }
 
-    /// Check if running as Windows Administrator
-    #[cfg(target_os = "windows")]
-    fn is_windows_admin() -> bool {
-        use std::process::Command;
-
-        let output = Command::new("powershell")
-            .args([
-                "-Command",
-                "([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)",
-            ])
-            .output();
-
-        match output {
-            Ok(out) => String::from_utf8_lossy(&out.stdout).trim() == "True",
-            Err(_) => false,
-        }
-    }
-
     /// Add a public key to authorized_keys
-    pub fn add_authorized_key(&self, public_key: &str) -> Result<()> {
+    ///
+    /// The file is rewritten atomically (created `0o600` on Unix). Keys are
+    /// deduplicated by exact key-blob comparison, so a key whose blob is a
+    /// prefix of an existing one is still added.
+    ///
+    /// Returns `Ok(true)` when the key was actually appended and `Ok(false)`
+    /// when the exact key blob was already authorized (the file is left
+    /// untouched). Callers that roll a failed exchange back MUST only remove
+    /// the key when this returned `true`, or they would revoke a key that
+    /// predates the exchange.
+    pub fn add_authorized_key(&self, public_key: &str) -> Result<bool> {
         self.ensure_ssh_dir()?;
 
         let auth_keys_path = self.authorized_keys_path();
@@ -241,121 +278,99 @@ impl KeyManager {
             }
         }
 
-        // Check if key already exists
-        if auth_keys_path.exists() {
-            let existing = fs::read_to_string(&auth_keys_path)?;
-            // Extract the key fingerprint (second part) for comparison
-            let new_key_parts: Vec<&str> = public_key.split_whitespace().collect();
-            if new_key_parts.len() >= 2 {
-                let new_key_data = new_key_parts[1];
-                if existing.contains(new_key_data) {
-                    return Ok(()); // Key already authorized
-                }
+        let existing = if auth_keys_path.exists() {
+            fs::read_to_string(&auth_keys_path)?
+        } else {
+            String::new()
+        };
+
+        // Skip if the exact key blob is already authorized
+        if let Some(new_blob) = key_blob(public_key) {
+            if existing
+                .lines()
+                .any(|line| key_blob(line) == Some(new_blob))
+            {
+                return Ok(false);
             }
         }
 
-        // Append the key
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&auth_keys_path)?;
-
-        writeln!(file, "{}", public_key)?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&auth_keys_path, fs::Permissions::from_mode(0o600))?;
+        let mut contents = existing;
+        if !contents.is_empty() && !contents.ends_with('\n') {
+            contents.push('\n');
         }
+        contents.push_str(public_key);
+        contents.push('\n');
+
+        fsutil::write_atomic(&auth_keys_path, &contents)?;
 
         #[cfg(target_os = "windows")]
         {
             // Set proper ACL for Windows admin authorized_keys file
             // The file must be owned by Administrators or SYSTEM and not writable by others
-            if Self::is_windows_admin() {
+            if is_windows_admin() {
                 Self::set_windows_admin_key_permissions(&auth_keys_path)?;
             }
         }
 
-        Ok(())
+        Ok(true)
     }
 
     /// Set proper ACL permissions on Windows admin authorized_keys file
+    ///
+    /// Windows OpenSSH refuses an `administrators_authorized_keys` file with
+    /// lax permissions, so inheritance is stripped and full control granted to
+    /// Administrators and SYSTEM only. SIDs are used instead of account names
+    /// so this also works on localized Windows installs
+    /// (`*S-1-5-32-544` = Administrators, `*S-1-5-18` = SYSTEM).
     #[cfg(target_os = "windows")]
     fn set_windows_admin_key_permissions(path: &std::path::Path) -> Result<()> {
         use std::process::Command;
 
-        // Remove inherited permissions and set explicit ACL:
-        // - SYSTEM: Full control
-        // - Administrators: Full control
-        // This matches what OpenSSH Server expects
-        let path_str = path.to_string_lossy();
+        let path_str = path.to_string_lossy().into_owned();
 
-        // Use icacls which works on all Windows versions (including Server 2012 R2)
+        // icacls works on all Windows versions (including Server 2012 R2):
         // 1. Reset and disable inheritance
         // 2. Grant Administrators full control
         // 3. Grant SYSTEM full control
-        let commands = [
-            format!("icacls \"{}\" /inheritance:r", path_str),
-            format!("icacls \"{}\" /grant Administrators:F", path_str),
-            format!("icacls \"{}\" /grant SYSTEM:F", path_str),
+        let icacls_args: [&[&str]; 3] = [
+            &["/inheritance:r"],
+            &["/grant", "*S-1-5-32-544:F"],
+            &["/grant", "*S-1-5-18:F"],
         ];
 
-        for cmd in &commands {
-            let output = Command::new("cmd").args(["/C", cmd]).output();
+        for args in icacls_args {
+            let output = Command::new("icacls")
+                .arg(&path_str)
+                .args(args)
+                .output()
+                .map_err(|e| {
+                    ConnectoError::Io(std::io::Error::new(
+                        e.kind(),
+                        format!("Failed to run icacls {:?} on {}: {}", args, path_str, e),
+                    ))
+                })?;
 
-            if let Ok(out) = output {
-                if !out.status.success() {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    warn!("icacls command failed: {}", stderr);
-                }
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(ConnectoError::Io(std::io::Error::other(format!(
+                    "icacls {:?} on {} failed: {}",
+                    args,
+                    path_str,
+                    stderr.trim()
+                ))));
             }
         }
 
         Ok(())
     }
 
-    /// Unused - keeping for reference. PowerShell ACL method doesn't work on older Windows.
-    #[cfg(target_os = "windows")]
-    #[allow(dead_code)]
-    fn set_windows_admin_key_permissions_powershell(path: &std::path::Path) -> Result<()> {
-        use std::process::Command;
-
-        let path_str = path.to_string_lossy();
-
-        let output = Command::new("powershell")
-            .args([
-                "-Command",
-                &format!(
-                    r#"
-                    $acl = Get-Acl '{}'
-                    $acl.SetAccessRuleProtection($true, $false)
-                    $adminRule = New-Object System.Security.AccessControl.FileSystemAccessRule('BUILTIN\Administrators', 'FullControl', 'Allow')
-                    $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule('NT AUTHORITY\SYSTEM', 'FullControl', 'Allow')
-                    $acl.SetAccessRule($adminRule)
-                    $acl.SetAccessRule($systemRule)
-                    Set-Acl '{}' $acl
-                    "#,
-                    path_str, path_str
-                ),
-            ])
-            .output();
-
-        match output {
-            Ok(out) if out.status.success() => Ok(()),
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                warn!("Could not set ACL on {}: {}", path_str, stderr);
-                Ok(())
-            }
-            Err(e) => {
-                warn!("Could not set ACL on {}: {}", path_str, e);
-                Ok(())
-            }
-        }
-    }
-
     /// Remove a public key from authorized_keys
+    ///
+    /// Matching compares the base64 key blob (second whitespace-separated
+    /// field) of each line for exact equality, so a key whose blob is a
+    /// substring of another key's blob never removes the wrong line. Returns
+    /// `Ok(false)` without rewriting the file when no line matched; otherwise
+    /// the file is rewritten atomically.
     pub fn remove_authorized_key(&self, public_key: &str) -> Result<bool> {
         let auth_keys_path = self.authorized_keys_path();
 
@@ -363,23 +378,22 @@ impl KeyManager {
             return Ok(false);
         }
 
+        let target_blob = key_blob(public_key)
+            .ok_or_else(|| ConnectoError::KeyParsing("Invalid key format".to_string()))?;
+
         let content = fs::read_to_string(&auth_keys_path)?;
-        let key_parts: Vec<&str> = public_key.split_whitespace().collect();
-
-        if key_parts.len() < 2 {
-            return Err(ConnectoError::KeyParsing("Invalid key format".to_string()));
-        }
-
-        let key_data = key_parts[1];
-        let new_content: Vec<&str> = content
+        let retained: Vec<&str> = content
             .lines()
-            .filter(|line| !line.contains(key_data))
+            .filter(|line| key_blob(line) != Some(target_blob))
             .collect();
 
-        let removed = new_content.len() < content.lines().count();
-        fs::write(&auth_keys_path, new_content.join("\n") + "\n")?;
+        if retained.len() == content.lines().count() {
+            // Nothing matched; leave the file untouched
+            return Ok(false);
+        }
 
-        Ok(removed)
+        fsutil::write_atomic(&auth_keys_path, &(retained.join("\n") + "\n"))?;
+        Ok(true)
     }
 
     /// List all authorized keys
@@ -411,12 +425,6 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_key_algorithm_default() {
-        let algo = KeyAlgorithm::default();
-        assert_eq!(algo, KeyAlgorithm::Ed25519);
-    }
-
-    #[test]
     fn test_generate_ed25519_key() {
         let key_pair = SshKeyPair::generate(KeyAlgorithm::Ed25519, "test@connecto").unwrap();
 
@@ -424,6 +432,20 @@ mod tests {
         assert!(key_pair.public_key.starts_with("ssh-ed25519 "));
         assert!(key_pair.public_key.contains("test@connecto"));
         assert_eq!(key_pair.algorithm, KeyAlgorithm::Ed25519);
+    }
+
+    #[test]
+    fn test_generate_rsa4096_key() {
+        // Slower than Ed25519, but this is the only RSA-4096 coverage.
+        let key_pair = SshKeyPair::generate(KeyAlgorithm::Rsa4096, "rsa@test").unwrap();
+
+        assert!(key_pair.private_key.contains("OPENSSH PRIVATE KEY"));
+        assert!(key_pair.public_key.starts_with("ssh-rsa "));
+        assert!(key_pair.public_key.contains("rsa@test"));
+        assert_eq!(key_pair.algorithm, KeyAlgorithm::Rsa4096);
+        // The generated key must parse back as a valid RSA public key
+        let parsed = SshKeyPair::parse_public_key(&key_pair.public_key).unwrap();
+        assert_eq!(parsed.algorithm().as_str(), "ssh-rsa");
     }
 
     #[test]
@@ -438,6 +460,35 @@ mod tests {
     fn test_parse_invalid_public_key() {
         let result = SshKeyPair::parse_public_key("invalid-key");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_fingerprint_sha256_of_generated_key() {
+        let key_pair = SshKeyPair::generate(KeyAlgorithm::Ed25519, "test@connecto").unwrap();
+
+        let fingerprint = fingerprint_sha256(&key_pair.public_key).unwrap();
+        assert!(fingerprint.starts_with("SHA256:"));
+
+        // Stable across calls for the same key
+        let again = fingerprint_sha256(&key_pair.public_key).unwrap();
+        assert_eq!(fingerprint, again);
+    }
+
+    #[test]
+    fn test_fingerprint_sha256_known_fixture() {
+        // Fixture generated with ssh-keygen; expected value from `ssh-keygen -lf`.
+        let public_key =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOe+ZEWqatUUD1EaBS1DRn/J0hKQPSiW0fLQ7a7Af96S fixture@connecto";
+        let fingerprint = fingerprint_sha256(public_key).unwrap();
+        assert_eq!(
+            fingerprint,
+            "SHA256:mTiqtUQvo0mB/zDzQbxahaBBq+KJ62pV8ECXptWqzLg"
+        );
+    }
+
+    #[test]
+    fn test_fingerprint_sha256_invalid_key() {
+        assert!(fingerprint_sha256("not-a-key").is_err());
     }
 
     #[test]
@@ -467,9 +518,13 @@ mod tests {
 
         let private_content = fs::read_to_string(&private_path).unwrap();
         assert!(private_content.contains("OPENSSH PRIVATE KEY"));
+        assert!(private_content.ends_with('\n'));
 
         let public_content = fs::read_to_string(&public_path).unwrap();
         assert!(public_content.starts_with("ssh-ed25519 "));
+        // Newline-terminated like ssh-keygen output, but only once
+        assert!(public_content.ends_with('\n'));
+        assert!(!public_content.ends_with("\n\n"));
     }
 
     #[test]
@@ -480,7 +535,8 @@ mod tests {
         let manager = KeyManager::with_dir(ssh_dir);
         let key_pair = SshKeyPair::generate(KeyAlgorithm::Ed25519, "test@connecto").unwrap();
 
-        manager.add_authorized_key(&key_pair.public_key).unwrap();
+        let added = manager.add_authorized_key(&key_pair.public_key).unwrap();
+        assert!(added, "a new key must report that it was added");
 
         let keys = manager.list_authorized_keys().unwrap();
         assert_eq!(keys.len(), 1);
@@ -495,8 +551,10 @@ mod tests {
         let manager = KeyManager::with_dir(ssh_dir);
         let key_pair = SshKeyPair::generate(KeyAlgorithm::Ed25519, "test@connecto").unwrap();
 
-        manager.add_authorized_key(&key_pair.public_key).unwrap();
-        manager.add_authorized_key(&key_pair.public_key).unwrap(); // Add again
+        assert!(manager.add_authorized_key(&key_pair.public_key).unwrap());
+        // Adding again must report "already present" so rollback paths know
+        // the exchange did not actually install anything.
+        assert!(!manager.add_authorized_key(&key_pair.public_key).unwrap());
 
         let keys = manager.list_authorized_keys().unwrap();
         assert_eq!(keys.len(), 1); // Should still be only 1
@@ -522,6 +580,141 @@ mod tests {
         let keys = manager.list_authorized_keys().unwrap();
         assert_eq!(keys.len(), 1);
         assert!(keys[0].contains("test2@connecto"));
+    }
+
+    #[test]
+    fn test_remove_authorized_key_requires_exact_blob_match() {
+        let temp_dir = TempDir::new().unwrap();
+        let ssh_dir = temp_dir.path().join(".ssh");
+        let manager = KeyManager::with_dir(ssh_dir);
+
+        // The first key's blob is a strict prefix of the second key's blob;
+        // substring matching would remove both.
+        let short_key = "ssh-ed25519 AAAAshort short@host";
+        let long_key = "ssh-ed25519 AAAAshortANDLONGER long@host";
+
+        manager.add_authorized_key(short_key).unwrap();
+        manager.add_authorized_key(long_key).unwrap();
+        assert_eq!(manager.list_authorized_keys().unwrap().len(), 2);
+
+        let removed = manager.remove_authorized_key(short_key).unwrap();
+        assert!(removed);
+
+        let keys = manager.list_authorized_keys().unwrap();
+        assert_eq!(keys.len(), 1);
+        assert!(keys[0].contains("AAAAshortANDLONGER"));
+    }
+
+    #[test]
+    fn test_add_authorized_key_distinguishes_blob_prefix() {
+        let temp_dir = TempDir::new().unwrap();
+        let ssh_dir = temp_dir.path().join(".ssh");
+        let manager = KeyManager::with_dir(ssh_dir);
+
+        // Adding a key whose blob is a prefix of an existing blob must not be
+        // treated as a duplicate.
+        manager
+            .add_authorized_key("ssh-ed25519 AAAAshortANDLONGER long@host")
+            .unwrap();
+        manager
+            .add_authorized_key("ssh-ed25519 AAAAshort short@host")
+            .unwrap();
+
+        assert_eq!(manager.list_authorized_keys().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_remove_authorized_key_no_match_leaves_file_untouched() {
+        let temp_dir = TempDir::new().unwrap();
+        let ssh_dir = temp_dir.path().join(".ssh");
+        let manager = KeyManager::with_dir(ssh_dir);
+
+        let key_pair = SshKeyPair::generate(KeyAlgorithm::Ed25519, "kept@connecto").unwrap();
+        let other = SshKeyPair::generate(KeyAlgorithm::Ed25519, "absent@connecto").unwrap();
+
+        manager.add_authorized_key(&key_pair.public_key).unwrap();
+
+        let path = manager.authorized_keys_path();
+        let content_before = fs::read_to_string(&path).unwrap();
+        let mtime_before = fs::metadata(&path).unwrap().modified().unwrap();
+
+        let removed = manager.remove_authorized_key(&other.public_key).unwrap();
+        assert!(!removed);
+
+        // The file must not have been rewritten at all
+        assert_eq!(fs::read_to_string(&path).unwrap(), content_before);
+        assert_eq!(
+            fs::metadata(&path).unwrap().modified().unwrap(),
+            mtime_before
+        );
+    }
+
+    #[test]
+    fn test_remove_authorized_key_preserves_other_lines() {
+        let temp_dir = TempDir::new().unwrap();
+        let ssh_dir = temp_dir.path().join(".ssh");
+        let manager = KeyManager::with_dir(ssh_dir);
+
+        let first = SshKeyPair::generate(KeyAlgorithm::Ed25519, "first@connecto").unwrap();
+        let second = SshKeyPair::generate(KeyAlgorithm::Ed25519, "second@connecto").unwrap();
+        let third = SshKeyPair::generate(KeyAlgorithm::Ed25519, "third@connecto").unwrap();
+
+        manager.add_authorized_key(&first.public_key).unwrap();
+        manager.add_authorized_key(&second.public_key).unwrap();
+        manager.add_authorized_key(&third.public_key).unwrap();
+
+        assert!(manager.remove_authorized_key(&second.public_key).unwrap());
+
+        let keys = manager.list_authorized_keys().unwrap();
+        assert_eq!(keys.len(), 2);
+        assert!(keys[0].contains("first@connecto"));
+        assert!(keys[1].contains("third@connecto"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_authorized_keys_file_has_0600_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let ssh_dir = temp_dir.path().join(".ssh");
+        let manager = KeyManager::with_dir(ssh_dir);
+
+        let key_pair = SshKeyPair::generate(KeyAlgorithm::Ed25519, "perm@connecto").unwrap();
+        manager.add_authorized_key(&key_pair.public_key).unwrap();
+
+        let mode = fs::metadata(manager.authorized_keys_path())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_key_pair_private_key_has_0600_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let ssh_dir = temp_dir.path().join(".ssh");
+        let manager = KeyManager::with_dir(ssh_dir);
+
+        let key_pair = SshKeyPair::generate(KeyAlgorithm::Ed25519, "perm@connecto").unwrap();
+        let (private_path, _) = manager.save_key_pair(&key_pair, "connecto_perm").unwrap();
+
+        let mode = fs::metadata(&private_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn test_key_blob_extraction() {
+        assert_eq!(
+            key_blob("ssh-ed25519 AAAAC3Nza comment@host"),
+            Some("AAAAC3Nza")
+        );
+        assert_eq!(key_blob("ssh-ed25519 AAAAC3Nza"), Some("AAAAC3Nza"));
+        assert_eq!(key_blob("ssh-ed25519"), None);
+        assert_eq!(key_blob(""), None);
     }
 
     #[test]

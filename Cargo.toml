@@ -16,6 +16,7 @@ description = "AirDrop-like SSH pairing application"
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
+tokio-util = "0.7"
 
 # mDNS discovery
 mdns-sd = "0.11"
@@ -27,6 +28,9 @@ rand = "0.8"
 # Networking
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+hostname = "0.4"
+local-ip-address = "0.6"
+futures = "0.3"
 
 # Error handling
 thiserror = "1.0"
@@ -38,11 +42,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # CLI specific
 clap = { version = "4.4", features = ["derive"] }
+clap_complete = "4.4"
 colored = "2.1"
 dialoguer = "0.11"
 indicatif = "0.17"
 directories = "5.0"
+libc = "0.2"
+
+# Bluetooth Low Energy
+btleplug = "0.11"
+bluer = { version = "0.17", features = ["bluetoothd"] }
+uuid = { version = "1.0", features = ["v4"] }
 
 # Testing
-mockall = "0.12"
 tempfile = "3.10"

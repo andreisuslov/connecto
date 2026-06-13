@@ -16,15 +16,18 @@ Download the latest release from [GitHub Releases](https://github.com/andreisusl
 
 ```bash
 # Apple Silicon (M1/M2/M3)
-curl -LO https://github.com/andreisuslov/connecto/releases/latest/download/connecto-aarch64-apple-darwin.tar.gz
-tar xzf connecto-aarch64-apple-darwin.tar.gz
+curl -LO https://github.com/andreisuslov/connecto/releases/latest/download/connecto-macos-aarch64.tar.gz
+tar xzf connecto-macos-aarch64.tar.gz
 sudo mv connecto /usr/local/bin/
 
 # Intel Mac
-curl -LO https://github.com/andreisuslov/connecto/releases/latest/download/connecto-x86_64-apple-darwin.tar.gz
-tar xzf connecto-x86_64-apple-darwin.tar.gz
+curl -LO https://github.com/andreisuslov/connecto/releases/latest/download/connecto-macos-x86_64.tar.gz
+tar xzf connecto-macos-x86_64.tar.gz
 sudo mv connecto /usr/local/bin/
 ```
+
+Each release also publishes a `.sha256` checksum file alongside every
+archive.
 
 ## Windows
 
@@ -38,9 +41,9 @@ irm https://raw.githubusercontent.com/andreisuslov/connecto/main/install.ps1 | i
 
 This will:
 - Download the latest release
-- Install to `C:\Program Files\Connecto`
-- Add to PATH
-- Configure firewall rules for mDNS and the Connecto port
+- Install to `%LOCALAPPDATA%\connecto`
+- Add to PATH (system PATH when run as Administrator, user PATH otherwise)
+- Configure firewall rules for mDNS and the Connecto port (Administrator only)
 
 ### Chocolatey
 
@@ -50,9 +53,9 @@ choco install connecto
 
 ### Manual installation
 
-1. Download `connecto-x86_64-pc-windows-msvc.zip` from [GitHub Releases](https://github.com/andreisuslov/connecto/releases)
-2. Extract to `C:\Program Files\Connecto`
-3. Add to PATH
+1. Download `connecto-windows-x86_64.zip` from [GitHub Releases](https://github.com/andreisuslov/connecto/releases)
+2. Extract to a directory of your choice (e.g. `%LOCALAPPDATA%\connecto`)
+3. Add that directory to PATH
 
 ## Linux
 

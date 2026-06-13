@@ -1,5 +1,9 @@
 # Build artifacts
 /target/
+/release/
+
+# Secrets
+.env
 
 # IDE
 .idea/
@@ -12,11 +16,7 @@
 .DS_Store
 Thumbs.db
 
-# Tauri
-/connecto_gui/src-tauri/target/
-
 # Test artifacts
-/tmp/
 *.log
 
 # Node

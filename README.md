@@ -8,7 +8,7 @@ Connecto eliminates the hassle of manual SSH key setup. Instead of copying IP ad
 
 **On the target machine** (where you want to SSH into):
 ```bash
-connecto listen
+connecto listen          # add --verify to approve each pairing with a code
 ```
 
 **On the client machine** (where you want to SSH from):
@@ -76,6 +76,7 @@ connecto ssh off     # Disable SSH server
 - **mDNS Discovery** - Auto-discover devices on your network
 - **VPN Support** - Cross-subnet scanning
 - **Zero-config Pairing** - One command key exchange
+- **Verified Pairing** - `--verify` gates key installation behind a verification code
 - **Auto SSH Config** - `ssh hostname` just works
 - **Cross-platform** - macOS, Linux, Windows
 - **SSH Server Management** - Enable/disable SSH server with one command on all platforms

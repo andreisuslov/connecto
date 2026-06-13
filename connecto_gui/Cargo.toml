@@ -20,13 +20,12 @@ tauri-build = { version = "1.5", features = [] }
 connecto_core = { path = "../connecto_core" }
 tauri = { version = "1.6", features = ["shell-open"] }
 serde = { workspace = true }
-serde_json = { workspace = true }
 tokio = { workspace = true }
-tracing = { workspace = true }
+tokio-util = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }
 
 [features]
 default = ["custom-protocol"]

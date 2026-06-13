@@ -93,8 +93,9 @@ connecto config path
 ```
 
 The config file is stored at:
-- **macOS/Linux**: `~/.config/connecto/config.json`
-- **Windows**: `%APPDATA%\connecto\config.json`
+- **macOS**: `~/Library/Application Support/com.connecto.connecto/config.json`
+- **Linux**: `~/.config/connecto/config.json`
+- **Windows**: `%APPDATA%\connecto\connecto\config\config.json`
 
 ## One-time subnet scan
 

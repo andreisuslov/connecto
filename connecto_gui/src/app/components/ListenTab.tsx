@@ -18,6 +18,11 @@ interface ListenerStatus {
   port: number;
 }
 
+interface ListenerInfo extends ListenerStatus {
+  listening: boolean;
+  last_event: string | null;
+}
+
 export function ListenTab() {
   const [isListening, setIsListening] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
@@ -25,11 +30,32 @@ export function ListenTab() {
   const [port, setPort] = useState('8099');
   const [addresses, setAddresses] = useState<string[]>([]);
   const [listenerInfo, setListenerInfo] = useState<ListenerStatus | null>(null);
+  const [lastEvent, setLastEvent] = useState<string | null>(null);
 
   useEffect(() => {
     loadInitialData();
-    checkListenerStatus();
+    restoreListenerStatus();
   }, []);
+
+  // Poll listener activity (connections, key exchanges) while listening
+  useEffect(() => {
+    if (!isListening) return;
+    const interval = setInterval(async () => {
+      try {
+        const info = await invoke<ListenerInfo>('get_listener_info');
+        if (info.listening) {
+          setLastEvent(info.last_event);
+        } else {
+          setIsListening(false);
+          setListenerInfo(null);
+          setLastEvent(null);
+        }
+      } catch (error) {
+        console.error('Failed to poll listener status:', error);
+      }
+    }, 500);
+    return () => clearInterval(interval);
+  }, [isListening]);
 
   const loadInitialData = async () => {
     try {
@@ -44,12 +70,23 @@ export function ListenTab() {
     }
   };
 
-  const checkListenerStatus = async () => {
+  // Restore the full listener state on mount/remount (not just the boolean),
+  // so returning to this tab during an active listen shows the correct port,
+  // device name, and last event rather than stale defaults.
+  const restoreListenerStatus = async () => {
     try {
-      const status = await invoke<boolean>('get_listener_status');
-      setIsListening(status);
+      const info = await invoke<ListenerInfo>('get_listener_info');
+      setIsListening(info.listening);
+      if (info.listening) {
+        setListenerInfo({ device_name: info.device_name, port: info.port });
+        setLastEvent(info.last_event);
+        if (info.device_name) {
+          setDeviceName(info.device_name);
+        }
+        setPort(String(info.port));
+      }
     } catch (error) {
-      console.error('Failed to check listener status:', error);
+      console.error('Failed to restore listener status:', error);
     }
   };
 
@@ -77,6 +114,7 @@ export function ListenTab() {
       await invoke('stop_listener');
       setIsListening(false);
       setListenerInfo(null);
+      setLastEvent(null);
       toast.info('Stopped listening');
     } catch (error) {
       toast.error(`Failed to stop listener: ${error}`);
@@ -105,6 +143,9 @@ export function ListenTab() {
                   <CardDescription className="text-green-700">
                     {listenerInfo ? `${listenerInfo.device_name} on port ${listenerInfo.port}` : `Port ${port}`}
                   </CardDescription>
+                  {lastEvent && (
+                    <CardDescription className="text-green-700">{lastEvent}</CardDescription>
+                  )}
                 </div>
               </div>
               <Button variant="destructive" onClick={handleStopListening}>
