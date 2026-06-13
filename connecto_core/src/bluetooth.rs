@@ -413,13 +413,10 @@ impl BluetoothAdvertiser {
             ConnectoError::Bluetooth(format!("Failed to create BlueZ session: {}", e))
         })?;
 
-        let adapter_name = session.default_adapter().await.map_err(|e| {
+        // bluer's `default_adapter()` returns the `Adapter` itself, not a name.
+        let adapter = session.default_adapter().await.map_err(|e| {
             ConnectoError::Bluetooth(format!("Failed to get default adapter: {}", e))
         })?;
-
-        let adapter = session
-            .adapter(&adapter_name)
-            .map_err(|e| ConnectoError::Bluetooth(format!("Failed to get adapter: {}", e)))?;
 
         // Ensure adapter is powered on
         if !adapter.is_powered().await.unwrap_or(false) {
@@ -428,7 +425,7 @@ impl BluetoothAdvertiser {
             })?;
         }
 
-        info!("BlueZ adapter initialized: {}", adapter_name);
+        info!("BlueZ adapter initialized: {}", adapter.name());
 
         Ok(Self {
             session,
