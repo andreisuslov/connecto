@@ -113,11 +113,12 @@ connecto pair --rsa <target>
 | Component | Location | Permissions |
 |-----------|----------|-------------|
 | Private key | `~/.ssh/connecto_*` | 600 (owner read/write) |
-| Public key | `~/.ssh/connecto_*.pub` | 644 (world readable) |
+| Public key | `~/.ssh/connecto_*.pub` | 600 (owner read/write) |
 | Authorized keys | `~/.ssh/authorized_keys` | 600 |
 
 Files are written atomically (a crash mid-write cannot truncate
-`authorized_keys` or `~/.ssh/config`).
+`authorized_keys` or `~/.ssh/config`). Public keys contain no secret
+material, so you may safely share them or `chmod 644` them yourself.
 
 ### Key lifecycle
 

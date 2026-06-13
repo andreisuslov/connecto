@@ -15,9 +15,12 @@ use tracing::{debug, info, warn};
 
 pub(super) struct LinuxBackend {
     interface: Option<String>,
-    /// nmcli connection we created (deleted on restore)
+    /// nmcli connection profile this backend caused to exist — created for
+    /// hosting, or persisted by `nmcli device wifi connect` when joining
+    /// (deleted on restore)
     connection_name: Option<String>,
-    /// Whether the `iw` IBSS fallback was used (left on restore)
+    /// Whether the interface was switched to IBSS mode via `iw` (IBSS left
+    /// and managed mode restored on restore)
     used_iw: bool,
     /// IP we added via `ip addr add` (removed on restore)
     configured_ip: Option<String>,
@@ -119,32 +122,59 @@ impl LinuxBackend {
     }
 
     /// Create ad-hoc network using iw (requires root)
+    ///
+    /// Sequence matters: the interface type can only change while the link
+    /// is down, and `iw ibss join` requires an up interface already in
+    /// IBSS mode (down → set type ibss → up → ibss join).
     fn create_network_iw(&mut self, ssid: &str, interface: &str) -> Result<()> {
-        // First, bring down any existing connection
+        // The link must be down to switch the interface type
         let _ = Command::new("ip")
             .args(["link", "set", interface, "down"])
             .output();
 
-        // Set interface to IBSS (ad-hoc) mode
+        // Switch from managed to IBSS (ad-hoc) mode
+        let type_output = Command::new("iw")
+            .args(["dev", interface, "set", "type", "ibss"])
+            .output()
+            .map_err(|e| ConnectoError::Network(format!("iw set type ibss failed: {}", e)))?;
+
+        if !type_output.status.success() {
+            // Bring the link back up before bailing; nothing else changed
+            let _ = Command::new("ip")
+                .args(["link", "set", interface, "up"])
+                .output();
+            let stderr = String::from_utf8_lossy(&type_output.stderr);
+            return Err(ConnectoError::Network(format!(
+                "iw set type ibss failed: {}",
+                stderr.trim()
+            )));
+        }
+
+        // The mode changed; from here on restore must put the interface
+        // back into managed mode (even if the join below fails)
+        self.used_iw = true;
+
+        // Bring the interface up; the IBSS join requires it
+        let _ = Command::new("ip")
+            .args(["link", "set", interface, "up"])
+            .output();
+
+        // Join (create) the IBSS network
         let output = Command::new("iw")
             .args([
                 "dev", interface, "ibss", "join", ssid,
-                "2462", // ADHOC_CHANNEL (11) frequency in MHz
+                "2462", // ADHOC_CHANNEL (11) frequency in MHz: 2407 + 11 * 5
             ])
             .output()
             .map_err(|e| ConnectoError::Network(format!("iw ibss join failed: {}", e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ConnectoError::Network(format!("iw failed: {}", stderr)));
+            return Err(ConnectoError::Network(format!(
+                "iw ibss join failed: {}",
+                stderr.trim()
+            )));
         }
-
-        self.used_iw = true;
-
-        // Bring interface up
-        let _ = Command::new("ip")
-            .args(["link", "set", interface, "up"])
-            .output();
 
         // Configure IP address
         self.configure_adhoc_ip(ADHOC_HOST_IP, interface)?;
@@ -258,17 +288,38 @@ impl AdHocBackend for LinuxBackend {
     fn join_network(&mut self, ssid: &str) -> Result<AdHocOutcome> {
         let interface = self.interface()?;
 
-        let output = Command::new("nmcli")
+        // Try as an open network first (macOS/Linux hosts create open
+        // networks)
+        let open_attempt = Command::new("nmcli")
             .args(["device", "wifi", "connect", ssid])
             .output()
             .map_err(|e| ConnectoError::Network(format!("Failed to join network: {}", e)))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ConnectoError::Network(format!(
-                "Failed to join network: {}",
-                stderr
-            )));
+        // NetworkManager persists an autoconnect profile named after the
+        // SSID (even for some failed attempts); record it so restore
+        // deletes it instead of leaking it.
+        self.connection_name = Some(ssid.to_string());
+
+        if !open_attempt.status.success() {
+            // Windows hosts protect their hosted network with a WPA2 key
+            // both sides derive from the SSID; retry with it
+            let password = super::derive_join_password(ssid);
+            let keyed_attempt = Command::new("nmcli")
+                .args(["device", "wifi", "connect", ssid, "password", &password])
+                .output()
+                .map_err(|e| ConnectoError::Network(format!("Failed to join network: {}", e)))?;
+
+            if !keyed_attempt.status.success() {
+                let open_err = String::from_utf8_lossy(&open_attempt.stderr);
+                let keyed_err = String::from_utf8_lossy(&keyed_attempt.stderr);
+                return Err(ConnectoError::Network(format!(
+                    "Failed to join network '{}': {} (retry with the derived \
+                     Connecto password also failed: {})",
+                    ssid,
+                    open_err.trim(),
+                    keyed_err.trim()
+                )));
+            }
         }
 
         // Configure IP for client (different from host)
@@ -303,11 +354,21 @@ impl AdHocBackend for LinuxBackend {
                 .output();
         }
 
-        // If using iw, leave the IBSS network
+        // If using iw, leave the IBSS network and put the interface back
+        // into managed mode (the type only changes while the link is down)
         if self.used_iw {
             if let Some(ref interface) = self.interface {
                 let _ = Command::new("iw")
                     .args(["dev", interface, "ibss", "leave"])
+                    .output();
+                let _ = Command::new("ip")
+                    .args(["link", "set", interface, "down"])
+                    .output();
+                let _ = Command::new("iw")
+                    .args(["dev", interface, "set", "type", "managed"])
+                    .output();
+                let _ = Command::new("ip")
+                    .args(["link", "set", interface, "up"])
                     .output();
             }
             self.used_iw = false;

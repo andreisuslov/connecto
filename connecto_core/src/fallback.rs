@@ -98,12 +98,24 @@ fn sanitize_ssid_component(device_name: &str) -> String {
 }
 
 /// Generate the default hosted-network password (Windows requires 8+ chars)
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn generate_password(sanitized_name: &str) -> String {
     format!(
         "connecto{}",
         sanitized_name.chars().take(4).collect::<String>()
     )
+}
+
+/// Derive the WPA2 key protecting a Windows-hosted ad-hoc network from its
+/// SSID
+///
+/// Windows hosted networks require a key (macOS/Linux create open
+/// networks). The SSID is `ADHOC_NETWORK_PREFIX` + the sanitized device
+/// name and the host derives its key from that same sanitized name, so any
+/// joiner can recompute the key from the SSID alone.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn derive_join_password(ssid: &str) -> String {
+    generate_password(ssid.strip_prefix(ADHOC_NETWORK_PREFIX).unwrap_or(ssid))
 }
 
 /// Parse a macOS product version like `"14.4.1"` into `(major, minor)`
@@ -825,6 +837,17 @@ mod tests {
         // Windows hosted networks require 8+ characters even for empty names
         assert!(generate_password("").len() >= 8);
         assert_eq!(generate_password("abcdef"), "connectoabcd");
+    }
+
+    #[test]
+    fn test_derive_join_password_matches_host_password() {
+        // The joining side must recompute exactly the key a Windows host
+        // generated from its sanitized device name
+        let ssid = format!("{}my-device", ADHOC_NETWORK_PREFIX);
+        assert_eq!(derive_join_password(&ssid), generate_password("my-device"));
+        assert_eq!(derive_join_password(&ssid), "connectomy-d");
+        // Non-connecto SSIDs still produce a deterministic key
+        assert_eq!(derive_join_password("Other"), "connectoOthe");
     }
 
     #[test]

@@ -445,11 +445,8 @@ impl BluetoothAdvertiser {
     /// * `ip` - IP address to advertise
     /// * `port` - TCP port to advertise
     pub async fn advertise(&mut self, name: &str, ip: IpAddr, port: u16) -> Result<()> {
-        use bluer::adv::{Advertisement, AdvertisementHandle};
-        use bluer::gatt::local::{
-            Application, Characteristic, CharacteristicRead, CharacteristicReadRequest, Service,
-        };
-        use std::collections::BTreeMap;
+        use bluer::adv::Advertisement;
+        use bluer::gatt::local::{Application, Characteristic, CharacteristicRead, Service};
 
         info!("Starting BLE advertising: {} at {}:{}", name, ip, port);
 

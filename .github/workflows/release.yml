@@ -51,10 +51,13 @@ jobs:
           fi
           # Build-time stamping of the remaining version sources.
           sed -i.bak -E "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" connecto_gui/package.json
+          # Root "version" (line 3) and packages."".version (line 9) only;
+          # dependency entries further down must not be touched.
+          sed -i.bak -E "1,10s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" connecto_gui/package-lock.json
           sed -i.bak -E "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" connecto_gui/tauri.conf.json
           sed -i.bak -E "s|<version>[^<]*</version>|<version>$VERSION</version>|" packaging/chocolatey/connecto.nuspec
-          rm -f connecto_gui/package.json.bak connecto_gui/tauri.conf.json.bak packaging/chocolatey/connecto.nuspec.bak
-          echo "Stamped version $VERSION into package.json, tauri.conf.json, and connecto.nuspec."
+          rm -f connecto_gui/package.json.bak connecto_gui/package-lock.json.bak connecto_gui/tauri.conf.json.bak packaging/chocolatey/connecto.nuspec.bak
+          echo "Stamped version $VERSION into package.json, package-lock.json, tauri.conf.json, and connecto.nuspec."
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

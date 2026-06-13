@@ -18,6 +18,8 @@ pub(super) struct WindowsBackend {
     hosting: bool,
     /// Interface we pinned a static IP on (reset to DHCP on restore)
     configured_interface: Option<String>,
+    /// WLAN profile we installed for joining (deleted on restore)
+    created_profile: Option<String>,
 }
 
 impl WindowsBackend {
@@ -26,6 +28,7 @@ impl WindowsBackend {
             password,
             hosting: false,
             configured_interface: None,
+            created_profile: None,
         }
     }
 
@@ -71,12 +74,13 @@ impl AdHocBackend for WindowsBackend {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
 
-        // Parse output to find current SSID
+        // Parse output to find current SSID. split_once keeps everything
+        // after the first colon so SSIDs containing ':' survive intact.
         for line in stdout.lines() {
             let trimmed = line.trim();
             if trimmed.starts_with("SSID") && !trimmed.contains("BSSID") {
-                if let Some(ssid) = trimmed.split(':').nth(1) {
-                    let network = ssid.trim().to_string();
+                if let Some((_, value)) = trimmed.split_once(':') {
+                    let network = value.trim().to_string();
                     if !network.is_empty() {
                         return Ok(Some(network));
                     }
@@ -172,7 +176,34 @@ impl AdHocBackend for WindowsBackend {
     }
 
     fn join_network(&mut self, ssid: &str) -> Result<AdHocOutcome> {
-        // Connect to the network (will prompt for password if needed)
+        // `netsh wlan connect` only works against a saved profile (it does
+        // NOT prompt for credentials), so install a temporary profile that
+        // matches the target network first.
+        let network = inspect_network(ssid)?;
+
+        if network.is_adhoc {
+            return Err(ConnectoError::Network(format!(
+                "'{}' is an IBSS (ad-hoc) network, and Windows 8.1 and later \
+                 cannot join IBSS networks. Run 'connecto listen' on this \
+                 Windows machine instead, so it hosts the network, and join \
+                 from the other device.",
+                ssid
+            )));
+        }
+
+        // Open network (macOS/Linux host) vs WPA2 hosted network (Windows
+        // host; both sides derive the key from the SSID).
+        let password = if network.is_open {
+            None
+        } else {
+            Some(super::derive_join_password(ssid))
+        };
+
+        add_profile(ssid, password.as_deref())?;
+        // The profile exists from here on; make sure restore deletes it
+        // even if connecting fails below.
+        self.created_profile = Some(ssid.to_string());
+
         let output = Command::new("netsh")
             .args(["wlan", "connect", &format!("name={}", ssid)])
             .output()
@@ -238,6 +269,14 @@ impl AdHocBackend for WindowsBackend {
                 .output();
 
             self.hosting = false;
+        }
+
+        // Delete the temporary WLAN profile we installed for joining
+        // (disassociates from the ad-hoc network as a side effect)
+        if let Some(profile) = self.created_profile.take() {
+            let _ = Command::new("netsh")
+                .args(["wlan", "delete", "profile", &format!("name={}", profile)])
+                .output();
         }
 
         // Reset the interface we pinned back to DHCP
@@ -314,12 +353,13 @@ pub(super) fn scan_for_networks() -> Result<Vec<String>> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // Parse output to find SSIDs starting with our prefix
+    // Parse output to find SSIDs starting with our prefix (split_once so
+    // SSIDs containing ':' survive intact)
     for line in stdout.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("SSID") && !trimmed.contains("BSSID") {
-            if let Some(ssid) = trimmed.split(':').nth(1) {
-                let network = ssid.trim().to_string();
+            if let Some((_, value)) = trimmed.split_once(':') {
+                let network = value.trim().to_string();
                 if network.starts_with(ADHOC_NETWORK_PREFIX) && !networks.contains(&network) {
                     networks.push(network);
                 }
@@ -361,28 +401,23 @@ fn check_hosted_network_support() -> Result<()> {
 /// Returns `None` when it cannot be identified; callers must not guess.
 fn find_hosted_network_adapter() -> Option<String> {
     let output = Command::new("netsh")
-        .args(["wlan", "show", "hostednetwork"])
+        .args(["interface", "show", "interface"])
         .output()
         .ok()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // The hosted network surfaces as a "Local Area Connection*" interface
-    let interface_output = Command::new("netsh")
-        .args(["interface", "show", "interface"])
-        .output()
-        .ok()?;
-
-    let interface_stdout = String::from_utf8_lossy(&interface_output.stdout);
-
-    for line in interface_stdout.lines() {
-        if line.contains("Local Area Connection")
-            && (line.contains("Hosted") || stdout.contains("Started"))
-        {
-            // Extract interface name (last column)
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 4 {
-                return Some(parts[3..].join(" "));
+    // Once started, the hosted network surfaces as a *connected* virtual
+    // adapter named "Local Area Connection* N" — the literal asterisk marks
+    // Microsoft's hosted-network/Wi-Fi Direct virtual adapters. A plain
+    // "Local Area Connection" (no asterisk) is a physical NIC and must not
+    // match. Columns: Admin State / State / Type / Interface Name.
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 4 && parts[1] == "Connected" {
+            let name = parts[3..].join(" ");
+            if name.starts_with("Local Area Connection*") {
+                return Some(name);
             }
         }
     }
@@ -418,11 +453,11 @@ fn interface_for_ssid(ssid: &str) -> Option<String> {
         // Note: field labels are localized on non-English Windows; when
         // parsing fails the caller falls back to an explicit warning.
         if trimmed.starts_with("Name") {
-            if let Some(value) = trimmed.split(':').nth(1) {
+            if let Some((_, value)) = trimmed.split_once(':') {
                 current_name = Some(value.trim().to_string());
             }
         } else if trimmed.starts_with("SSID") && !trimmed.contains("BSSID") {
-            if let Some(value) = trimmed.split(':').nth(1) {
+            if let Some((_, value)) = trimmed.split_once(':') {
                 if value.trim() == ssid {
                     return current_name;
                 }
@@ -431,4 +466,141 @@ fn interface_for_ssid(ssid: &str) -> Option<String> {
     }
 
     None
+}
+
+/// What `netsh wlan show networks` reports about a visible network
+struct VisibleNetwork {
+    is_adhoc: bool,
+    is_open: bool,
+}
+
+/// Look up `ssid` in the current scan results to learn its network type
+/// and authentication, which the join profile must match
+///
+/// Errors when the network is not visible or the fields cannot be parsed
+/// (e.g. localized netsh output): guessing a profile would mis-join or
+/// fail silently, so the caller gets an honest error instead.
+fn inspect_network(ssid: &str) -> Result<VisibleNetwork> {
+    let output = Command::new("netsh")
+        .args(["wlan", "show", "networks", "mode=bssid"])
+        .output()
+        .map_err(|e| ConnectoError::Network(format!("Failed to scan networks: {}", e)))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let mut in_block = false;
+    let mut network_type: Option<String> = None;
+    let mut authentication: Option<String> = None;
+
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("SSID") && !trimmed.contains("BSSID") {
+            if in_block {
+                break; // reached the next network's block
+            }
+            if let Some((_, value)) = trimmed.split_once(':') {
+                in_block = value.trim() == ssid;
+            }
+        } else if in_block {
+            if let Some((label, value)) = trimmed.split_once(':') {
+                let label = label.trim();
+                if label.starts_with("Network type") {
+                    network_type = Some(value.trim().to_string());
+                } else if label.starts_with("Authentication") {
+                    authentication = Some(value.trim().to_string());
+                }
+            }
+        }
+    }
+
+    match (network_type, authentication) {
+        (Some(network_type), Some(authentication)) => Ok(VisibleNetwork {
+            is_adhoc: network_type.eq_ignore_ascii_case("Adhoc"),
+            is_open: authentication.to_ascii_lowercase().contains("open"),
+        }),
+        _ => Err(ConnectoError::Network(format!(
+            "Could not determine the type of network '{}' from 'netsh wlan \
+             show networks' (it may be out of range, or the netsh output is \
+             localized). Join it manually from WiFi settings instead — if it \
+             asks for a key, use '{}' — then re-run this command.",
+            ssid,
+            super::derive_join_password(ssid)
+        ))),
+    }
+}
+
+/// Install a temporary WLAN profile for `ssid` via `netsh wlan add profile`
+///
+/// `netsh wlan connect` refuses to connect to an SSID without a saved
+/// profile (it never prompts), so the joiner installs one — open, or
+/// WPA2-PSK with `password` — and restore deletes it again.
+fn add_profile(ssid: &str, password: Option<&str>) -> Result<()> {
+    let security = match password {
+        Some(password) => format!(
+            "<authEncryption><authentication>WPA2PSK</authentication>\
+             <encryption>AES</encryption><useOneX>false</useOneX></authEncryption>\
+             <sharedKey><keyType>passPhrase</keyType><protected>false</protected>\
+             <keyMaterial>{}</keyMaterial></sharedKey>",
+            xml_escape(password)
+        ),
+        None => "<authEncryption><authentication>open</authentication>\
+                 <encryption>none</encryption><useOneX>false</useOneX></authEncryption>"
+            .to_string(),
+    };
+
+    let profile_xml = format!(
+        "<?xml version=\"1.0\"?>\
+         <WLANProfile xmlns=\"http://www.microsoft.com/networking/WLAN/profile/v1\">\
+         <name>{ssid}</name>\
+         <SSIDConfig><SSID><name>{ssid}</name></SSID></SSIDConfig>\
+         <connectionType>ESS</connectionType>\
+         <connectionMode>manual</connectionMode>\
+         <MSM><security>{security}</security></MSM>\
+         </WLANProfile>",
+        ssid = xml_escape(ssid),
+        security = security
+    );
+
+    let path = std::env::temp_dir().join(format!("connecto-wlan-{}.xml", std::process::id()));
+    std::fs::write(&path, &profile_xml)
+        .map_err(|e| ConnectoError::Network(format!("Failed to write WLAN profile: {}", e)))?;
+
+    let output = Command::new("netsh")
+        .args([
+            "wlan",
+            "add",
+            "profile",
+            &format!("filename={}", path.display()),
+        ])
+        .output();
+
+    // The file is only needed for the add call; it contains the key, so do
+    // not leave it behind regardless of the outcome.
+    let _ = std::fs::remove_file(&path);
+
+    let output =
+        output.map_err(|e| ConnectoError::Network(format!("netsh add profile failed: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(ConnectoError::Network(format!(
+            "Failed to install WLAN profile for '{}': {} {}",
+            ssid,
+            stdout.trim(),
+            stderr.trim()
+        )));
+    }
+
+    Ok(())
+}
+
+/// Minimal XML escaping for WLAN profile fields
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }

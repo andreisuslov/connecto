@@ -12,7 +12,7 @@ use tokio::io::{
     AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
 };
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, oneshot, Semaphore};
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
@@ -97,6 +97,21 @@ pub(crate) const MAX_MESSAGE_LEN: u64 = 64 * 1024;
 
 /// Read timeout applied to handshake and sync protocol messages
 pub(crate) const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Upper bound on how long the server waits for the [`ApprovalCallback`]
+///
+/// When the callback (typically an interactive prompt) has not answered
+/// within this window the pairing is treated as DENIED and the client gets
+/// the rejection [`Message::Error`]. Combined with the client waiting
+/// [`APPROVAL_WAIT_TIMEOUT`] (> this bound) for [`Message::KeyAccepted`],
+/// an approval can never complete after the client has stopped listening.
+const APPROVAL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Client-side read timeout for [`Message::KeyAccepted`] only
+///
+/// Longer than the other reads because the server may legitimately spend up
+/// to [`APPROVAL_TIMEOUT`] in an interactive approval prompt before replying.
+const APPROVAL_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Write a [`Message`] as newline-delimited JSON and flush the writer
 pub(crate) async fn write_message<W: AsyncWrite + Unpin>(
@@ -291,6 +306,30 @@ impl HandshakeServer {
     /// receiver dropped), after which in-flight handshakes are drained with a
     /// short timeout.
     pub async fn run(&mut self, event_tx: mpsc::Sender<ServerEvent>) -> Result<()> {
+        self.run_inner(event_tx, None).await
+    }
+
+    /// Like [`Self::run`], but additionally stops accepting when `shutdown`
+    /// resolves (fired, or its sender dropped) and then DRAINS in-flight
+    /// handshakes with the same short grace period
+    ///
+    /// Callers that race `run()` against a signal (e.g. Ctrl-C) should use
+    /// this and send the shutdown signal instead of dropping the future, so
+    /// in-flight handshakes complete (or roll back) instead of being aborted
+    /// mid-flight.
+    pub async fn run_with_shutdown(
+        &mut self,
+        event_tx: mpsc::Sender<ServerEvent>,
+        shutdown: oneshot::Receiver<()>,
+    ) -> Result<()> {
+        self.run_inner(event_tx, Some(shutdown)).await
+    }
+
+    async fn run_inner(
+        &mut self,
+        event_tx: mpsc::Sender<ServerEvent>,
+        shutdown: Option<oneshot::Receiver<()>>,
+    ) -> Result<()> {
         let listener = self
             .listener
             .take()
@@ -302,11 +341,26 @@ impl HandshakeServer {
         let mut handshakes: JoinSet<()> = JoinSet::new();
         let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_HANDSHAKES));
 
+        // Without a shutdown receiver this arm never resolves.
+        let shutdown_signal = async move {
+            match shutdown {
+                Some(rx) => {
+                    let _ = rx.await;
+                }
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::pin!(shutdown_signal);
+
         loop {
             // Reap finished handshake tasks so the set does not grow unboundedly
             while handshakes.try_join_next().is_some() {}
 
             tokio::select! {
+                _ = &mut shutdown_signal => {
+                    debug!("Shutdown requested; draining in-flight handshakes");
+                    break;
+                }
                 _ = event_tx.closed() => {
                     debug!("Event channel closed; shutting handshake server down");
                     break;
@@ -510,7 +564,11 @@ async fn handle_client(
 
             // Consult the approval callback (if any) BEFORE installing the
             // key. The callback may block on user input, so it runs on the
-            // blocking thread pool.
+            // blocking thread pool. The wait is bounded by APPROVAL_TIMEOUT:
+            // past that the pairing is treated as denied, so the key can
+            // never be installed after the client (which waits
+            // APPROVAL_WAIT_TIMEOUT > APPROVAL_TIMEOUT for KeyAccepted) has
+            // already given up.
             let approved = match &approval {
                 None => true,
                 Some(callback) => {
@@ -521,11 +579,21 @@ async fn handle_client(
                         fingerprint: fingerprint.clone(),
                         verification_code: verification_code.clone(),
                     };
-                    tokio::task::spawn_blocking(move || callback(&request))
-                        .await
-                        .map_err(|e| {
+                    let consult = tokio::task::spawn_blocking(move || callback(&request));
+                    match tokio::time::timeout(APPROVAL_TIMEOUT, consult).await {
+                        Ok(joined) => joined.map_err(|e| {
                             ConnectoError::Handshake(format!("Approval callback failed: {}", e))
-                        })?
+                        })?,
+                        Err(_) => {
+                            // The blocking prompt thread cannot be cancelled;
+                            // its eventual answer is discarded.
+                            warn!(
+                                "Approval for {} not answered within {:?}; treating as denied",
+                                client_name, APPROVAL_TIMEOUT
+                            );
+                            false
+                        }
+                    }
                 }
             };
 
@@ -541,42 +609,69 @@ async fn handle_client(
                 ));
             }
 
-            // Install the key. Every failure after this point must roll the
-            // installation back so a half-completed exchange does not leave
-            // the peer with SSH access.
-            key_manager.add_authorized_key(&public_key)?;
+            // Install the key and confirm the pairing. This install→confirm
+            // critical section runs in its own spawned task that we merely
+            // await: if THIS handshake task is cancelled (JoinSet drop,
+            // shutdown abort), the sub-task still runs to completion, so the
+            // exchange always ends either fully confirmed or rolled back —
+            // never with a silently installed key.
+            let critical_section = {
+                let key_manager = Arc::clone(&key_manager);
+                let public_key = public_key.clone();
+                let client_name = client_name.clone();
+                tokio::spawn(async move {
+                    // Every failure after a successful install must roll the
+                    // installation back so a half-completed exchange does not
+                    // leave the peer with SSH access. `installed == false`
+                    // means the key predates this exchange and must be kept.
+                    let installed = key_manager.add_authorized_key(&public_key)?;
 
-            let post_install = async {
-                let accepted = Message::KeyAccepted {
-                    message: "Key added to authorized_keys".to_string(),
-                };
-                write_message(&mut writer, &accepted).await?;
+                    let post_install = async {
+                        let accepted = Message::KeyAccepted {
+                            message: "Key added to authorized_keys".to_string(),
+                        };
+                        write_message(&mut writer, &accepted).await?;
 
-                // Get current user (USER on Unix, USERNAME on Windows)
-                let ssh_user = std::env::var("USER")
-                    .or_else(|_| std::env::var("USERNAME"))
-                    .unwrap_or_else(|_| "unknown".to_string());
+                        // Get current user (USER on Unix, USERNAME on Windows)
+                        let ssh_user = std::env::var("USER")
+                            .or_else(|_| std::env::var("USERNAME"))
+                            .unwrap_or_else(|_| "unknown".to_string());
 
-                let complete = Message::PairingComplete { ssh_user };
-                write_message(&mut writer, &complete).await?;
-                Ok::<(), ConnectoError>(())
+                        let complete = Message::PairingComplete { ssh_user };
+                        write_message(&mut writer, &complete).await?;
+                        Ok::<(), ConnectoError>(())
+                    };
+
+                    if let Err(e) = post_install.await {
+                        warn!(
+                            "Pairing with {} failed after key install; rolling back: {}",
+                            client_name, e
+                        );
+                        if installed {
+                            match key_manager.remove_authorized_key(&public_key) {
+                                Ok(true) => info!("Rolled back key installed for {}", client_name),
+                                Ok(false) => {
+                                    warn!("Rollback found no matching key in authorized_keys")
+                                }
+                                Err(rollback_err) => warn!(
+                                    "Rollback failed; key for {} remains installed: {}",
+                                    client_name, rollback_err
+                                ),
+                            }
+                        } else {
+                            info!(
+                                "Key for {} was already authorized before this exchange; keeping it",
+                                client_name
+                            );
+                        }
+                        return Err(e);
+                    }
+                    Ok::<(), ConnectoError>(())
+                })
             };
-
-            if let Err(e) = post_install.await {
-                warn!(
-                    "Pairing with {} failed after key install; rolling back: {}",
-                    client_name, e
-                );
-                match key_manager.remove_authorized_key(&public_key) {
-                    Ok(true) => info!("Rolled back key installed for {}", client_name),
-                    Ok(false) => warn!("Rollback found no matching key in authorized_keys"),
-                    Err(rollback_err) => warn!(
-                        "Rollback failed; key for {} remains installed: {}",
-                        client_name, rollback_err
-                    ),
-                }
-                return Err(e);
-            }
+            critical_section
+                .await
+                .map_err(|e| ConnectoError::Handshake(format!("Pairing task failed: {}", e)))??;
 
             let _ = event_tx
                 .send(ServerEvent::PairingComplete {
@@ -663,8 +758,11 @@ impl HandshakeClient {
         };
         write_message(&mut writer, &key_exchange).await?;
 
-        // Read KeyAccepted
-        let accepted = read_message(&mut reader, HANDSHAKE_READ_TIMEOUT).await?;
+        // Read KeyAccepted. This read alone uses the longer
+        // APPROVAL_WAIT_TIMEOUT: the server may sit in an interactive
+        // approval prompt for up to APPROVAL_TIMEOUT before replying, and we
+        // must still be listening when its verdict arrives.
+        let accepted = read_message(&mut reader, APPROVAL_WAIT_TIMEOUT).await?;
 
         match accepted {
             Message::KeyAccepted { .. } => {}
@@ -940,6 +1038,30 @@ mod tests {
             events.push(event);
         }
         assert!(!events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_run_with_shutdown_exits_on_signal() {
+        let temp_dir = TempDir::new().unwrap();
+        let ssh_dir = temp_dir.path().join(".ssh");
+        let key_manager = KeyManager::with_dir(ssh_dir);
+
+        let mut server = HandshakeServer::new(key_manager, "Test Server");
+        server.listen(0).await.unwrap();
+
+        let (event_tx, _event_rx) = mpsc::channel(10);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let server_handle =
+            tokio::spawn(async move { server.run_with_shutdown(event_tx, shutdown_rx).await });
+
+        // The event receiver stays alive, so only the signal can stop it
+        shutdown_tx.send(()).unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("run_with_shutdown did not exit after the shutdown signal")
+            .unwrap();
+        assert!(result.is_ok());
     }
 
     #[tokio::test]

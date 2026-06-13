@@ -2,9 +2,7 @@
 
 use anyhow::Result;
 use colored::Colorize;
-use connecto_core::discovery::{
-    get_local_addresses, DiscoveredDevice, ServiceBrowser, SubnetScanner, DEFAULT_PORT,
-};
+use connecto_core::discovery::{DiscoveredDevice, ServiceBrowser, SubnetScanner, DEFAULT_PORT};
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use connecto_core::fallback::AdHocNetwork;
 #[cfg(any(
@@ -243,79 +241,41 @@ pub async fn run_with_options(
     let _ = bluetooth_enabled;
 
     if devices.is_empty() {
-        // We have a usable local address yet nothing answered: the router may
-        // be isolating clients from each other (AP/client isolation).
-        let network_isolated = !get_local_addresses().is_empty();
-
         println!("{}", "No devices found.".yellow());
         println!();
-
-        if network_isolated {
-            println!(
-                "{}",
-                "⚠ Network isolation detected - your router is blocking device-to-device traffic."
-                    .yellow()
-                    .bold()
-            );
-            println!();
-            println!("{}", "Quick fix - create a direct WiFi connection:".bold());
-            println!();
-            println!(
-                "  {} On the {} Mac (running 'connecto listen'):",
-                "1.".cyan(),
-                "TARGET".green().bold()
-            );
-            println!(
-                "     {} Hold {} + click WiFi icon in menu bar",
-                "•".dimmed(),
-                "Option".cyan()
-            );
-            println!(
-                "     {} Click '{}'",
-                "•".dimmed(),
-                "Create Network...".cyan()
-            );
-            println!(
-                "     {} Name it: {} (or any name)",
-                "•".dimmed(),
-                "Connecto".cyan()
-            );
-            println!("     {} Click {}", "•".dimmed(), "Create".cyan());
-            println!();
-            println!(
-                "  {} On {} Mac (this one):",
-                "2.".cyan(),
-                "THIS".green().bold()
-            );
-            println!(
-                "     {} Click WiFi icon → join the network you just created",
-                "•".dimmed()
-            );
-            println!(
-                "     {} Run '{}' again",
-                "•".dimmed(),
-                "connecto scan".cyan()
-            );
-            println!();
-        } else {
-            println!("{}", "Make sure:".dimmed());
-            println!(
-                "  {} The target device is running 'connecto listen'",
-                "•".dimmed()
-            );
-            println!(
-                "  {} Your firewall allows connections on port 8099",
-                "•".dimmed()
-            );
-            println!();
-            println!(
-                "{}",
-                "If devices are on different subnets (e.g., VPN):".dimmed()
-            );
-            println!("  {} connecto config add-subnet 10.x.x.0/24", "→".cyan());
-            println!();
-        }
-
+        println!("{}", "Make sure:".dimmed());
+        println!(
+            "  {} The target device is running 'connecto listen'",
+            "•".dimmed()
+        );
+        println!(
+            "  {} Your firewall allows connections on port 8099",
+            "•".dimmed()
+        );
+        println!();
+        println!(
+            "{}",
+            "If devices are on different subnets (e.g., VPN):".dimmed()
+        );
+        println!("  {} connecto config add-subnet 10.x.x.0/24", "→".cyan());
+        println!();
+        println!(
+            "{}",
+            "If the target IS listening on this network, your router may be".dimmed()
+        );
+        println!(
+            "{}",
+            "isolating devices from each other (AP/client isolation, common".dimmed()
+        );
+        println!(
+            "{}",
+            "on guest networks). 'connecto listen --adhoc' on the target".dimmed()
+        );
+        println!(
+            "{}",
+            "creates a direct WiFi network that bypasses it.".dimmed()
+        );
+        println!();
         println!("{}", "Or pair directly if you know the IP:".dimmed());
         println!("  {} connecto pair <ip>:8099", "→".cyan());
         println!();

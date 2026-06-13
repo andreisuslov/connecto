@@ -220,23 +220,28 @@ pub(super) async fn status() -> Result<()> {
         .unwrap_or(false);
 
     if systemctl_exists {
-        // Check if sshd service is active
+        // Check if the sshd service is active; a non-success exit (unknown
+        // or inactive unit) falls back to the 'ssh' unit name used on
+        // Ubuntu/Debian
         let status_output = Command::new("systemctl")
             .args(["is-active", "sshd"])
             .output()
             .await;
 
         let is_active = match status_output {
-            Ok(o) => String::from_utf8_lossy(&o.stdout).trim() == "active",
-            Err(_) => {
-                // Try 'ssh' service name
-                Command::new("systemctl")
-                    .args(["is-active", "ssh"])
-                    .output()
-                    .await
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "active")
-                    .unwrap_or(false)
+            Ok(o)
+                if o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "active" =>
+            {
+                true
             }
+            _ => Command::new("systemctl")
+                .args(["is-active", "ssh"])
+                .output()
+                .await
+                .map(|o| {
+                    o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "active"
+                })
+                .unwrap_or(false),
         };
 
         if is_active {
@@ -249,19 +254,26 @@ pub(super) async fn status() -> Result<()> {
             );
         }
 
-        // Check if enabled on boot
+        // Check if enabled on boot; same 'ssh' unit-name fallback as above
+        // (an 'sshd' alias also reports "alias", not "enabled")
         let enabled_output = Command::new("systemctl")
             .args(["is-enabled", "sshd"])
             .output()
             .await;
 
         let is_enabled = match enabled_output {
-            Ok(o) => String::from_utf8_lossy(&o.stdout).trim() == "enabled",
-            Err(_) => Command::new("systemctl")
+            Ok(o)
+                if o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "enabled" =>
+            {
+                true
+            }
+            _ => Command::new("systemctl")
                 .args(["is-enabled", "ssh"])
                 .output()
                 .await
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "enabled")
+                .map(|o| {
+                    o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "enabled"
+                })
                 .unwrap_or(false),
         };
 

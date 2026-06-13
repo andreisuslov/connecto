@@ -3,12 +3,15 @@
 use anyhow::{anyhow, Result};
 use colored::Colorize;
 use connecto_core::{
-    discovery::get_hostname, keys::KeyManager, protocol::HandshakeClient, sanitize_device_name,
-    AddOutcome, Config, HostEntry, SshConfig, DEFAULT_PORT,
+    discovery::get_hostname,
+    keys::{fingerprint_sha256, KeyManager},
+    protocol::{verification_code_for_key, HandshakeClient},
+    sanitize_device_name, AddOutcome, Config, HostEntry, SshConfig, DEFAULT_PORT,
 };
 
 use super::scan::load_cached_devices;
 use super::{error, info, resolve_key_pair, spinner, success, warn};
+use crate::SilentExit;
 
 pub async fn run(
     target: String,
@@ -34,6 +37,22 @@ pub async fn run(
     let config = Config::load().unwrap_or_default();
     let (key_pair, existing_key_path) =
         resolve_key_pair(key_path.as_deref(), rsa, comment.as_deref(), &config)?;
+
+    // Show the verification material BEFORE the exchange: the listener (with
+    // --verify) asks its user to compare this code while we are still
+    // waiting, so it must already be on this screen.
+    info(&format!(
+        "Key fingerprint:   {}",
+        fingerprint_sha256(&key_pair.public_key)?
+    ));
+    info(&format!(
+        "Verification code: {} {}",
+        verification_code_for_key(&key_pair.public_key)?
+            .green()
+            .bold(),
+        "(the listener may ask to compare this code before approving)".dimmed()
+    ));
+    println!();
 
     let spinner = spinner("magenta", "Connecting and exchanging keys...");
 
@@ -148,7 +167,9 @@ pub async fn run(
             println!("  {} Check that the address is correct", "•".dimmed());
             println!("  {} Verify firewall allows the connection", "•".dimmed());
             println!();
-            return Err(e.into());
+            // The diagnostics above are the error report; SilentExit keeps
+            // main from printing the same error a second time.
+            return Err(SilentExit.into());
         }
     }
 

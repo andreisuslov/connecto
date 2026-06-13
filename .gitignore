@@ -1,6 +1,6 @@
 # Build artifacts
 /target/
-release/
+/release/
 
 # Secrets
 .env

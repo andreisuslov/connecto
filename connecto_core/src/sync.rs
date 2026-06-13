@@ -27,6 +27,15 @@ pub const SYNC_SERVICE_TYPE: &str = "_connecto-sync._tcp.local.";
 /// Default timeout for peer discovery
 pub const DEFAULT_SYNC_TIMEOUT_SECS: u64 = 60;
 
+/// Delay between re-initiation attempts toward a discovered peer
+///
+/// A rejected or failed initiation is retried on this cadence (bounded by
+/// the run's overall deadline) instead of waiting for another mDNS
+/// resolution: a transient failure of the winning direction, or a peer that
+/// can accept inbound connections but not discover us, would otherwise stall
+/// the sync until the full timeout.
+const SYNC_RETRY_DELAY: Duration = Duration::from_secs(3);
+
 /// Events emitted during sync operation
 #[derive(Debug, Clone)]
 pub enum SyncEvent {
@@ -119,8 +128,9 @@ impl SyncHandler {
     /// 3. Scan for other sync peers
     /// 4. Attempt key exchange both ways; the responder-side arbitration
     ///    (see [`initiator_wins`]) ensures exactly one direction completes
-    /// 5. Exchange keys bidirectionally; each side installs the peer's key
-    ///    only after the protocol confirms the exchange
+    /// 5. Exchange keys bidirectionally; a failed install on either side
+    ///    prevents (or rolls back) the other side's install, so an aborted
+    ///    exchange leaves no one-sided SSH access behind
     pub async fn run(
         &self,
         port: u16,
@@ -198,6 +208,9 @@ impl SyncHandler {
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
         let mut browse_active = true;
         let mut attempts: JoinSet<Result<SyncResult>> = JoinSet::new();
+        // Peers we already run an initiation chain for (keyed by connection
+        // string); repeated DeviceFound events must not spawn parallel chains.
+        let mut initiating: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         loop {
             tokio::select! {
@@ -248,17 +261,35 @@ impl SyncHandler {
                             }).await;
 
                             if let Some(conn_str) = peer.connection_string() {
-                                let this = self.clone();
-                                let ssh_user = ssh_user.clone();
-                                let event_tx = event_tx.clone();
-                                attempts.spawn(async move {
-                                    with_deadline(deadline, this.handle_as_initiator(
-                                        &conn_str,
-                                        our_priority,
-                                        &ssh_user,
-                                        event_tx,
-                                    )).await
-                                });
+                                if initiating.insert(conn_str.clone()) {
+                                    let this = self.clone();
+                                    let ssh_user = ssh_user.clone();
+                                    let event_tx = event_tx.clone();
+                                    attempts.spawn(async move {
+                                        with_deadline(deadline, async {
+                                            // Retry rejected/failed initiations on a
+                                            // fixed cadence until the overall deadline;
+                                            // see SYNC_RETRY_DELAY for the rationale.
+                                            loop {
+                                                match this.handle_as_initiator(
+                                                    &conn_str,
+                                                    our_priority,
+                                                    &ssh_user,
+                                                    event_tx.clone(),
+                                                ).await {
+                                                    Ok(result) => break Ok(result),
+                                                    Err(e) => {
+                                                        warn!(
+                                                            "Sync initiation to {} failed: {}; retrying in {:?}",
+                                                            conn_str, e, SYNC_RETRY_DELAY
+                                                        );
+                                                        tokio::time::sleep(SYNC_RETRY_DELAY).await;
+                                                    }
+                                                }
+                                            }
+                                        }).await
+                                    });
+                                }
                             }
                         }
                         Some(_) => {
@@ -273,8 +304,10 @@ impl SyncHandler {
                     }
                 }
 
-                // A sync attempt finished: first success wins, failures
-                // (including arbitration rejections) just keep us waiting
+                // A sync attempt finished: first success wins. Failures here
+                // are responder-side errors or initiation chains that hit the
+                // deadline (initiation failures retry internally above); they
+                // just keep us waiting.
                 Some(joined) = attempts.join_next(), if !attempts.is_empty() => {
                     match joined {
                         Ok(Ok(result)) => break Ok(result),
@@ -289,6 +322,30 @@ impl SyncHandler {
             }
         }
         // Dropping the JoinSet aborts any attempts still in flight
+    }
+
+    /// Roll back a key installed during a failed exchange
+    ///
+    /// Only removes the key when this exchange actually installed it
+    /// (`installed == true`); a key that was already authorized before the
+    /// exchange (the re-sync case) is kept, so a failed re-sync can never
+    /// revoke previously granted SSH access.
+    fn rollback_installed_key(&self, peer_key: &str, peer_name: &str, installed: bool) {
+        if !installed {
+            info!(
+                "Key for {} was already authorized before this exchange; keeping it",
+                peer_name
+            );
+            return;
+        }
+        match self.key_manager.remove_authorized_key(peer_key) {
+            Ok(true) => info!("Rolled back key installed for {}", peer_name),
+            Ok(false) => warn!("Rollback found no matching key in authorized_keys"),
+            Err(rollback_err) => warn!(
+                "Rollback failed; key for {} remains installed: {}",
+                peer_name, rollback_err
+            ),
+        }
     }
 
     /// Handle sync as the initiator (we send SyncHello first)
@@ -354,21 +411,58 @@ impl SyncHandler {
                     })
                     .await;
 
-                // Confirm the exchange. The peer's key is NOT installed yet:
-                // installation happens only after the peer confirms success,
-                // so an aborted exchange leaves no key behind.
+                // Install the peer's key BEFORE confirming, so the exchange
+                // stays symmetric: a failed install on our side is reported
+                // to the responder (success: false), which then never
+                // installs our key either.
+                debug!("Adding peer key to authorized_keys");
+                let installed = match self.key_manager.add_authorized_key(&peer_key) {
+                    Ok(installed) => installed,
+                    Err(e) => {
+                        let failure = Message::SyncComplete {
+                            success: false,
+                            message: format!("Key installation failed: {}", e),
+                        };
+                        let _ = write_message(&mut writer, &failure).await;
+                        return Err(e);
+                    }
+                };
+
+                // Confirm the exchange; every failure from here on rolls our
+                // freshly installed key back so a half-completed exchange
+                // leaves no SSH access behind.
                 let complete = Message::SyncComplete {
                     success: true,
                     message: "Key exchange successful".to_string(),
                 };
-                write_message(&mut writer, &complete).await?;
+                if let Err(e) = write_message(&mut writer, &complete).await {
+                    warn!(
+                        "Sync with {} failed after key install; rolling back: {}",
+                        peer_name, e
+                    );
+                    self.rollback_installed_key(&peer_key, &peer_name, installed);
+                    return Err(e);
+                }
 
                 // Read SyncComplete from peer
-                let peer_complete = read_message(&mut reader, HANDSHAKE_READ_TIMEOUT).await?;
+                let peer_complete = match read_message(&mut reader, HANDSHAKE_READ_TIMEOUT).await {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        warn!(
+                            "Sync with {} failed after key install; rolling back: {}",
+                            peer_name, e
+                        );
+                        self.rollback_installed_key(&peer_key, &peer_name, installed);
+                        return Err(e);
+                    }
+                };
 
                 match peer_complete {
                     Message::SyncComplete { success, message } => {
                         if !success {
+                            // The responder's install failed; it kept nothing,
+                            // so neither do we.
+                            self.rollback_installed_key(&peer_key, &peer_name, installed);
                             return Err(ConnectoError::Sync(format!(
                                 "Peer reported failure: {}",
                                 message
@@ -377,13 +471,10 @@ impl SyncHandler {
                         let _ = event_tx.send(SyncEvent::KeyAccepted).await;
                     }
                     _ => {
+                        self.rollback_installed_key(&peer_key, &peer_name, installed);
                         return Err(ConnectoError::Protocol("Expected SyncComplete".to_string()));
                     }
                 }
-
-                // Both sides confirmed; install the peer's key
-                debug!("Adding peer key to authorized_keys");
-                self.key_manager.add_authorized_key(&peer_key)?;
 
                 let peer_ip = peer_addr.ip();
                 let peer_port = peer_addr.port();
@@ -504,7 +595,10 @@ impl SyncHandler {
                 };
                 write_message(&mut writer, &ack).await?;
 
-                // Read SyncComplete from peer
+                // Read SyncComplete from peer. A `success: false` here means
+                // the initiator's install failed (it sends its confirmation
+                // only after installing our key); we have installed nothing
+                // yet, so failing out keeps the exchange symmetric.
                 let peer_complete = read_message(&mut reader, HANDSHAKE_READ_TIMEOUT).await?;
 
                 match peer_complete {
@@ -522,18 +616,21 @@ impl SyncHandler {
                     }
                 }
 
-                // The initiator confirmed; install its key. If installation
-                // fails we report the failure to the peer (so it does not
-                // install ours either) instead of confirming.
+                // The initiator confirmed (and has installed our key);
+                // install its key. If installation fails we report the
+                // failure to the peer, which then rolls its install back.
                 debug!("Adding peer key to authorized_keys");
-                if let Err(e) = self.key_manager.add_authorized_key(&peer_key) {
-                    let failure = Message::SyncComplete {
-                        success: false,
-                        message: format!("Key installation failed: {}", e),
-                    };
-                    let _ = write_message(&mut writer, &failure).await;
-                    return Err(e);
-                }
+                let installed = match self.key_manager.add_authorized_key(&peer_key) {
+                    Ok(installed) => installed,
+                    Err(e) => {
+                        let failure = Message::SyncComplete {
+                            success: false,
+                            message: format!("Key installation failed: {}", e),
+                        };
+                        let _ = write_message(&mut writer, &failure).await;
+                        return Err(e);
+                    }
+                };
 
                 // Send our SyncComplete; on failure roll the freshly
                 // installed key back so a half-completed exchange leaves no
@@ -547,14 +644,7 @@ impl SyncHandler {
                         "Sync with {} failed after key install; rolling back: {}",
                         peer_name, e
                     );
-                    match self.key_manager.remove_authorized_key(&peer_key) {
-                        Ok(true) => info!("Rolled back key installed for {}", peer_name),
-                        Ok(false) => warn!("Rollback found no matching key in authorized_keys"),
-                        Err(rollback_err) => warn!(
-                            "Rollback failed; key for {} remains installed: {}",
-                            peer_name, rollback_err
-                        ),
-                    }
+                    self.rollback_installed_key(&peer_key, &peer_name, installed);
                     return Err(e);
                 }
 
@@ -922,6 +1012,232 @@ mod tests {
             .list_authorized_keys()
             .unwrap();
         assert!(keys.is_empty());
+    }
+
+    /// A rejected first initiation must be retried (and succeed) within the
+    /// run's deadline instead of stalling until timeout.
+    #[tokio::test]
+    async fn test_run_loop_retries_after_declined_initiation() {
+        let temp_dir = TempDir::new().unwrap();
+        let ssh_dir = temp_dir.path().join(".ssh");
+        let key_pair = SshKeyPair::generate(KeyAlgorithm::Ed25519, "alice@initiator").unwrap();
+        let handler =
+            SyncHandler::new(KeyManager::with_dir(ssh_dir.clone()), "Initiator", key_pair);
+
+        // Scripted peer: declines the first attempt, accepts the second.
+        let peer_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer_addr = peer_listener.local_addr().unwrap();
+        let responder_key = SshKeyPair::generate(KeyAlgorithm::Ed25519, "bob@responder").unwrap();
+        let scripted = tokio::spawn(async move {
+            for accept in [false, true] {
+                let (stream, _) = peer_listener.accept().await.unwrap();
+                let (reader, mut writer) = stream.into_split();
+                let mut reader = BufReader::new(reader);
+                read_message(&mut reader, HANDSHAKE_READ_TIMEOUT)
+                    .await
+                    .unwrap();
+
+                let ack = Message::SyncHelloAck {
+                    version: PROTOCOL_VERSION,
+                    device_name: "Responder".to_string(),
+                    public_key: if accept {
+                        responder_key.public_key.clone()
+                    } else {
+                        String::new()
+                    },
+                    key_comment: if accept {
+                        responder_key.comment.clone()
+                    } else {
+                        String::new()
+                    },
+                    ssh_user: if accept {
+                        "bob".to_string()
+                    } else {
+                        String::new()
+                    },
+                    accept_sync: accept,
+                };
+                write_message(&mut writer, &ack).await.unwrap();
+
+                if accept {
+                    let msg = read_message(&mut reader, HANDSHAKE_READ_TIMEOUT)
+                        .await
+                        .unwrap();
+                    assert!(
+                        matches!(msg, Message::SyncComplete { success: true, .. }),
+                        "initiator must confirm only after installing, got {:?}",
+                        msg
+                    );
+                    let complete = Message::SyncComplete {
+                        success: true,
+                        message: "ok".to_string(),
+                    };
+                    write_message(&mut writer, &complete).await.unwrap();
+                }
+            }
+        });
+
+        // Drive run_loop with a single DeviceFound for the scripted peer.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (peer_tx, peer_rx) = mpsc::channel(4);
+        let (event_tx, _event_rx) = mpsc::channel(64);
+        peer_tx
+            .send(DiscoveryEvent::DeviceFound(loopback_device(
+                "Responder",
+                peer_addr,
+            )))
+            .await
+            .unwrap();
+
+        let result = handler
+            .run_loop(listener, peer_rx, 42, 15, event_tx)
+            .await
+            .expect("a declined initiation must be retried until it succeeds");
+        assert_eq!(result.peer_name, "Responder");
+        scripted.await.unwrap();
+        drop(peer_tx);
+
+        let keys = KeyManager::with_dir(ssh_dir)
+            .list_authorized_keys()
+            .unwrap();
+        assert_eq!(keys.len(), 1);
+        assert!(keys[0].contains("bob@responder"));
+    }
+
+    /// Regression for the rollback-removes-pre-existing-key bug: when the
+    /// peer's key was ALREADY authorized before the exchange (re-sync), a
+    /// failed exchange must NOT remove it.
+    #[tokio::test]
+    async fn test_failed_exchange_preserves_preexisting_key() {
+        let temp_dir = TempDir::new().unwrap();
+        let ssh_dir = temp_dir.path().join(".ssh");
+        let key_pair = SshKeyPair::generate(KeyAlgorithm::Ed25519, "alice@initiator").unwrap();
+        let key_manager = KeyManager::with_dir(ssh_dir.clone());
+        let responder_key =
+            SshKeyPair::generate(KeyAlgorithm::Ed25519, "mallory@responder").unwrap();
+
+        // Pre-seed the peer's key, as an earlier successful exchange would
+        assert!(key_manager
+            .add_authorized_key(&responder_key.public_key)
+            .unwrap());
+
+        let handler = SyncHandler::new(key_manager, "Initiator", key_pair);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+
+        // Scripted responder: accepts, then reports failure in SyncComplete,
+        // which makes the initiator run its rollback path.
+        let scripted = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            read_message(&mut reader, HANDSHAKE_READ_TIMEOUT)
+                .await
+                .unwrap();
+
+            let ack = Message::SyncHelloAck {
+                version: PROTOCOL_VERSION,
+                device_name: "Responder".to_string(),
+                public_key: responder_key.public_key.clone(),
+                key_comment: responder_key.comment.clone(),
+                ssh_user: "mallory".to_string(),
+                accept_sync: true,
+            };
+            write_message(&mut writer, &ack).await.unwrap();
+
+            read_message(&mut reader, HANDSHAKE_READ_TIMEOUT)
+                .await
+                .unwrap();
+            let failure = Message::SyncComplete {
+                success: false,
+                message: "installation failed".to_string(),
+            };
+            write_message(&mut writer, &failure).await.unwrap();
+        });
+
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let result = handler
+            .handle_as_initiator(&addr, 42, "alice", event_tx)
+            .await;
+        assert!(result.is_err());
+        scripted.await.unwrap();
+
+        // The pre-existing key predates the failed exchange and must survive
+        let keys = KeyManager::with_dir(ssh_dir)
+            .list_authorized_keys()
+            .unwrap();
+        assert_eq!(
+            keys.len(),
+            1,
+            "rollback must not remove a key that predates the exchange"
+        );
+        assert!(keys[0].contains("mallory@responder"));
+    }
+
+    /// A responder receiving `SyncComplete { success: false }` (initiator's
+    /// install failed) must fail without installing the initiator's key.
+    #[tokio::test]
+    async fn test_responder_installs_nothing_on_initiator_reported_failure() {
+        let temp_dir = TempDir::new().unwrap();
+        let ssh_dir = temp_dir.path().join(".ssh");
+        let key_pair = SshKeyPair::generate(KeyAlgorithm::Ed25519, "bob@responder").unwrap();
+        let handler =
+            SyncHandler::new(KeyManager::with_dir(ssh_dir.clone()), "Responder", key_pair);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (event_tx, _event_rx) = mpsc::channel(16);
+
+        let responder = tokio::spawn(async move {
+            let (stream, peer_addr) = listener.accept().await.unwrap();
+            handler
+                .handle_as_responder(stream, peer_addr, 1, "bob", event_tx)
+                .await
+        });
+
+        // Winning initiator whose key installation "failed"
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let initiator_key = SshKeyPair::generate(KeyAlgorithm::Ed25519, "eve@initiator").unwrap();
+        let hello = Message::SyncHello {
+            version: PROTOCOL_VERSION,
+            device_name: "Initiator".to_string(),
+            initiator_priority: u64::MAX,
+            public_key: initiator_key.public_key.clone(),
+            key_comment: initiator_key.comment.clone(),
+            ssh_user: "eve".to_string(),
+        };
+        write_message(&mut writer, &hello).await.unwrap();
+
+        let ack = read_message(&mut reader, HANDSHAKE_READ_TIMEOUT)
+            .await
+            .unwrap();
+        assert!(matches!(
+            ack,
+            Message::SyncHelloAck {
+                accept_sync: true,
+                ..
+            }
+        ));
+
+        let failure = Message::SyncComplete {
+            success: false,
+            message: "Key installation failed".to_string(),
+        };
+        write_message(&mut writer, &failure).await.unwrap();
+
+        let result = responder.await.unwrap();
+        assert!(matches!(result, Err(ConnectoError::Sync(_))));
+
+        let keys = KeyManager::with_dir(ssh_dir)
+            .list_authorized_keys()
+            .unwrap();
+        assert!(
+            keys.is_empty(),
+            "responder must not keep an install when the initiator reported failure"
+        );
     }
 
     #[tokio::test]

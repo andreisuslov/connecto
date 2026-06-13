@@ -22,6 +22,7 @@ use tokio::sync::mpsc;
 ))]
 use super::warn;
 use super::{error, info, success};
+use crate::SilentExit;
 
 /// Ensure macOS firewall allows incoming connections to connecto
 #[cfg(target_os = "macos")]
@@ -222,7 +223,7 @@ pub async fn run_with_adhoc(
     let addresses = get_local_addresses();
     if addresses.is_empty() && !force_adhoc {
         error("No network interfaces found");
-        return Ok(());
+        return Err(SilentExit.into());
     }
 
     info(&format!("Device name: {}", device_name.cyan()));
@@ -308,8 +309,15 @@ pub async fn run_with_adhoc(
     let mut server = HandshakeServer::new(key_manager, &device_name);
     if verify {
         // The callback blocks on user input; HandshakeServer invokes it via
-        // spawn_blocking, so this never stalls the async runtime.
-        server = server.with_approval(Box::new(|request: &PairingRequest| {
+        // spawn_blocking, so this never stalls the async runtime. The mutex
+        // serializes concurrent approval prompts (continuous mode can serve
+        // several handshakes at once): at most one prompt owns the TTY at a
+        // time, so an answer is always bound to the request shown above it.
+        let prompt_gate = std::sync::Mutex::new(());
+        server = server.with_approval(Box::new(move |request: &PairingRequest| {
+            let _guard = prompt_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             println!();
             println!("{}", "Pairing approval required".yellow().bold());
             println!(
@@ -363,6 +371,10 @@ pub async fn run_with_adhoc(
         })
         .collect();
 
+    // Local addresses for the cross-subnet heuristic below: a client that is
+    // loopback or one of our own addresses is never a VPN/cross-subnet peer.
+    let local_addresses = addresses.clone();
+
     // Handle events in a separate task
     let event_handler = tokio::spawn(async move {
         let mut last_client_ip: Option<String> = None;
@@ -408,12 +420,19 @@ pub async fn run_with_adhoc(
                     ));
                     println!("  {} They can now SSH to this machine.", "→".cyan());
 
-                    // Check if client is from a different subnet (VPN scenario)
+                    // Check if client is from a different subnet (VPN scenario).
+                    // Loopback clients and our own addresses are local by
+                    // definition; suggesting `config add-subnet 127.0.0.0/24`
+                    // would be useless.
                     if let Some(ref client_ip) = last_client_ip {
+                        let is_local_client = client_ip
+                            .parse::<std::net::IpAddr>()
+                            .map(|ip| ip.is_loopback() || local_addresses.contains(&ip))
+                            .unwrap_or(false);
                         let client_subnet: String =
                             client_ip.split('.').take(3).collect::<Vec<_>>().join(".");
 
-                        if !local_subnets.iter().any(|s| s == &client_subnet) {
+                        if !is_local_client && !local_subnets.iter().any(|s| s == &client_subnet) {
                             println!();
                             println!(
                                 "{}",
@@ -441,22 +460,31 @@ pub async fn run_with_adhoc(
     });
 
     // Run server. Both modes race against Ctrl+C so the cleanup below
-    // (mDNS unregister, event task abort, Bluetooth stop, and the ad-hoc
+    // (mDNS unregister, event drain, Bluetooth stop, and the ad-hoc
     // network Drop at the end of this scope) also runs on interrupt.
     let server_result: Result<()> = if continuous {
-        // Run continuously until Ctrl+C
+        // Run continuously until Ctrl+C. On interrupt we SIGNAL the server
+        // instead of dropping its future, so it stops accepting and drains
+        // in-flight handshakes (with its internal grace period) rather than
+        // aborting them between key install and confirmation.
         info("Running in continuous mode (Ctrl+C to stop)...");
-        tokio::select! {
-            result = server.run(event_tx) => {
-                if let Err(e) = result {
-                    error(&format!("Server error: {}", e));
-                }
-                Ok(())
-            }
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let server_fut = server.run_with_shutdown(event_tx, shutdown_rx);
+        tokio::pin!(server_fut);
+        let run_result = tokio::select! {
+            result = &mut server_fut => result,
             _ = tokio::signal::ctrl_c() => {
                 println!();
                 info("Shutting down...");
-                Ok(())
+                let _ = shutdown_tx.send(());
+                server_fut.await
+            }
+        };
+        match run_result {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                error(&format!("Server error: {}", e));
+                Err(SilentExit.into())
             }
         }
     } else {
@@ -471,9 +499,13 @@ pub async fn run_with_adhoc(
         }
     };
 
+    // The server future has completed or been dropped by now, so every event
+    // sender is gone; await the handler (instead of aborting it) so queued
+    // pairing output drains before anything below prints.
+    let _ = event_handler.await;
+
     // Clean up
     advertiser.stop()?;
-    event_handler.abort();
 
     // Stop Bluetooth advertising
     #[cfg(feature = "bluetooth")]

@@ -98,7 +98,7 @@ impl SshConfig {
         if !self.path.exists() {
             return Ok(Vec::new());
         }
-        let lines = self.read_lines()?;
+        let (lines, _eol) = self.read_file()?;
         Ok(parse_blocks(&lines).into_iter().map(|b| b.entry).collect())
     }
 
@@ -106,9 +106,11 @@ impl SshConfig {
     ///
     /// If a connecto-managed block with the same alias already exists, its
     /// block is replaced in place and [`AddOutcome::Replaced`] is returned;
-    /// otherwise a new block is appended. Creates the config file (and its
-    /// parent directory, mode `0o700` on Unix) if missing. User-authored
-    /// blocks with the same alias are never modified.
+    /// any extra option lines the user added inside the managed block (e.g.
+    /// `Port`, `ProxyJump`) are preserved after the managed lines. Otherwise
+    /// a new block is appended. Creates the config file (and its parent
+    /// directory, mode `0o700` on Unix) if missing. User-authored blocks
+    /// with the same alias are never modified.
     pub fn add_host(&self, entry: &HostEntry) -> Result<AddOutcome> {
         self.ensure_parent_dir()?;
 
@@ -117,57 +119,94 @@ impl SshConfig {
         } else {
             String::new()
         };
+        let eol = detect_eol(&content);
         let lines: Vec<String> = content.lines().map(String::from).collect();
         let blocks = parse_blocks(&lines);
 
         if let Some(block) = blocks.iter().find(|b| b.entry.host == entry.host) {
+            // Keep any lines in the old block that are not one of the
+            // managed keys (marker, Host, HostName, User, IdentityFile) so
+            // user customizations survive a re-pair.
+            let extra: Vec<String> = lines[block.marker_idx..block.end_idx]
+                .iter()
+                .skip(2) // marker line + Host line
+                .filter(|line| {
+                    let trimmed = line.trim();
+                    key_value(trimmed, "HostName").is_none()
+                        && key_value(trimmed, "User").is_none()
+                        && key_value(trimmed, "IdentityFile").is_none()
+                })
+                .cloned()
+                .collect();
+
             let mut new_lines: Vec<String> = Vec::with_capacity(lines.len() + 5);
             new_lines.extend_from_slice(&lines[..block.marker_idx]);
             new_lines.extend(block_lines(entry));
+            new_lines.extend(extra);
             new_lines.extend_from_slice(&lines[block.end_idx..]);
-            self.write_lines(&new_lines)?;
+            self.write_lines(&new_lines, eol)?;
             debug!(host = %entry.host, "Replaced connecto-managed SSH config entry");
             return Ok(AddOutcome::Replaced);
         }
 
         let mut new_content = content;
-        new_content.push_str(&format_entry(entry));
+        let formatted = format_entry(entry);
+        if eol == "\n" {
+            new_content.push_str(&formatted);
+        } else {
+            new_content.push_str(&formatted.replace('\n', eol));
+        }
         fsutil::write_atomic(&self.path, &new_content)?;
         debug!(host = %entry.host, "Added connecto-managed SSH config entry");
         Ok(AddOutcome::Added)
     }
 
-    /// Remove a connecto-managed host entry by exact alias
+    /// Remove connecto-managed host entries by exact alias
     ///
-    /// Removes the block (including the marker line and the blank separator
-    /// line before it) and returns the removed entry so callers can decide
-    /// what to do with the associated key files. Returns `Ok(None)` if no
-    /// connecto-managed block matches; user-authored blocks are never
-    /// removed, even if they have the same alias.
+    /// Removes every matching managed block (including the marker line and
+    /// the blank separator line before each) and returns the first removed
+    /// entry so callers can decide what to do with the associated key files.
+    /// Duplicate same-alias blocks (e.g. from hand edits or imports) are all
+    /// removed, so the alias no longer resolves afterwards. Returns
+    /// `Ok(None)` if no connecto-managed block matches; user-authored blocks
+    /// are never removed, even if they have the same alias.
     pub fn remove_host(&self, host: &str) -> Result<Option<HostEntry>> {
         if !self.path.exists() {
             return Ok(None);
         }
-        let lines = self.read_lines()?;
+        let (lines, eol) = self.read_file()?;
         let blocks = parse_blocks(&lines);
 
-        let block = match blocks.into_iter().find(|b| b.entry.host == host) {
-            Some(b) => b,
+        let matching: Vec<Block> = blocks
+            .into_iter()
+            .filter(|b| b.entry.host == host)
+            .collect();
+        let first = match matching.first() {
+            Some(b) => b.entry.clone(),
             None => return Ok(None),
         };
 
-        // Also drop the blank separator line the writer places before the marker.
-        let mut start = block.marker_idx;
-        if start > 0 && lines[start - 1].trim().is_empty() {
-            start -= 1;
+        let mut keep = vec![true; lines.len()];
+        for block in &matching {
+            // Also drop the blank separator line the writer places before
+            // the marker.
+            let mut start = block.marker_idx;
+            if start > 0 && lines[start - 1].trim().is_empty() {
+                start -= 1;
+            }
+            for flag in keep.iter_mut().take(block.end_idx).skip(start) {
+                *flag = false;
+            }
         }
 
-        let mut new_lines: Vec<String> = Vec::with_capacity(lines.len());
-        new_lines.extend_from_slice(&lines[..start]);
-        new_lines.extend_from_slice(&lines[block.end_idx..]);
-        self.write_lines(&new_lines)?;
+        let new_lines: Vec<String> = lines
+            .into_iter()
+            .zip(keep)
+            .filter_map(|(line, keep)| keep.then_some(line))
+            .collect();
+        self.write_lines(&new_lines, eol)?;
         debug!(host, "Removed connecto-managed SSH config entry");
-        Ok(Some(block.entry))
+        Ok(Some(first))
     }
 
     /// Update the `HostName` of a connecto-managed entry by exact alias
@@ -178,7 +217,7 @@ impl SshConfig {
         if !self.path.exists() {
             return Ok(None);
         }
-        let mut lines = self.read_lines()?;
+        let (mut lines, eol) = self.read_file()?;
         let blocks = parse_blocks(&lines);
 
         let block = match blocks.into_iter().find(|b| b.entry.host == host) {
@@ -186,29 +225,33 @@ impl SshConfig {
             None => return Ok(None),
         };
 
-        let new_line = format!("    HostName {}", new_hostname);
+        let new_line = format!("    HostName {}", quote_value(new_hostname));
         match block.hostname_idx {
             Some(idx) => lines[idx] = new_line,
             // The writer always emits a HostName line; tolerate a hand-edited
             // block without one by inserting it right after the Host line.
             None => lines.insert(block.marker_idx + 2, new_line),
         }
-        self.write_lines(&lines)?;
+        self.write_lines(&lines, eol)?;
         debug!(host, new_hostname, "Updated connecto-managed HostName");
         Ok(Some(block.entry.hostname))
     }
 
-    /// Read the config file as a list of lines
-    fn read_lines(&self) -> Result<Vec<String>> {
+    /// Read the config file as a list of lines plus its dominant line ending
+    ///
+    /// The line ending is reused on write so a CRLF config stays CRLF.
+    fn read_file(&self) -> Result<(Vec<String>, &'static str)> {
         let content = fs::read_to_string(&self.path)?;
-        Ok(content.lines().map(String::from).collect())
+        let eol = detect_eol(&content);
+        Ok((content.lines().map(String::from).collect(), eol))
     }
 
-    /// Write lines back atomically, with a trailing newline
-    fn write_lines(&self, lines: &[String]) -> Result<()> {
-        let mut content = lines.join("\n");
+    /// Write lines back atomically, with a trailing newline, using the
+    /// file's original line ending
+    fn write_lines(&self, lines: &[String], eol: &str) -> Result<()> {
+        let mut content = lines.join(eol);
         if !content.is_empty() {
-            content.push('\n');
+            content.push_str(eol);
         }
         fsutil::write_atomic(&self.path, &content)
     }
@@ -229,14 +272,45 @@ impl SshConfig {
     }
 }
 
+/// Detect the dominant line ending of a config file
+///
+/// Returns `"\r\n"` only when CRLF endings outnumber bare-LF ones, so a new
+/// or empty file (and a mixed file with no CRLF majority) defaults to `"\n"`.
+fn detect_eol(content: &str) -> &'static str {
+    let crlf = content.matches("\r\n").count();
+    let lf = content.matches('\n').count() - crlf;
+    if crlf > lf {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+/// Quote a value for an ssh_config line if it contains whitespace
+///
+/// ssh_config splits arguments on whitespace unless they are enclosed in
+/// double quotes, so e.g. an `IdentityFile` path with spaces must be quoted.
+fn quote_value(value: &str) -> String {
+    if value.contains(char::is_whitespace) {
+        format!("\"{}\"", value)
+    } else {
+        value.to_string()
+    }
+}
+
 /// Format a managed entry in the exact four-line format used on disk
 ///
 /// This format must round-trip with entries already written by older
-/// connecto versions, so do not change it.
+/// connecto versions, so do not change it. Values containing whitespace are
+/// double-quoted per ssh_config rules.
 fn format_entry(entry: &HostEntry) -> String {
     format!(
         "\n{}\nHost {}\n    HostName {}\n    User {}\n    IdentityFile {}\n",
-        CONNECTO_MARKER, entry.host, entry.hostname, entry.user, entry.identity_file
+        CONNECTO_MARKER,
+        entry.host,
+        quote_value(&entry.hostname),
+        quote_value(&entry.user),
+        quote_value(&entry.identity_file)
     )
 }
 
@@ -245,20 +319,24 @@ fn block_lines(entry: &HostEntry) -> Vec<String> {
     vec![
         CONNECTO_MARKER.to_string(),
         format!("Host {}", entry.host),
-        format!("    HostName {}", entry.hostname),
-        format!("    User {}", entry.user),
-        format!("    IdentityFile {}", entry.identity_file),
+        format!("    HostName {}", quote_value(&entry.hostname)),
+        format!("    User {}", quote_value(&entry.user)),
+        format!("    IdentityFile {}", quote_value(&entry.identity_file)),
     ]
 }
 
 /// Parse all connecto-managed blocks out of the config lines
 ///
 /// A managed block is a [`CONNECTO_MARKER`] line immediately followed by a
-/// `Host` line with a single non-wildcard alias. The block extends until a
-/// blank line, the next `Host` line, the next marker, or end of file —
-/// trailing blocks at EOF are flushed. Keys may be indented or unindented,
-/// and entries missing `IdentityFile` (or other keys) are still emitted with
-/// those fields empty.
+/// `Host` line with a single non-wildcard alias. The block ends at the first
+/// blank line, the next marker, the next `Host`/`Match` section start
+/// (case-insensitive, at any indentation, like ssh itself), or end of file —
+/// trailing blocks at EOF are flushed. Indented option lines belong to the
+/// block. Un-indented lines are treated conservatively: they belong to the
+/// block only if they are a managed key (`HostName`/`User`/`IdentityFile`)
+/// not yet seen in the block (legacy flat-format blocks); anything else —
+/// e.g. a stray top-level directive right after the block — ends it, so
+/// remove/replace never destroys adjacent user-authored configuration.
 fn parse_blocks(lines: &[String]) -> Vec<Block> {
     let mut blocks = Vec::new();
     let mut i = 0;
@@ -291,17 +369,32 @@ fn parse_blocks(lines: &[String]) -> Vec<Block> {
 
         let mut j = i + 2;
         while j < lines.len() {
-            let trimmed = lines[j].trim();
-            if trimmed.is_empty() || trimmed == CONNECTO_MARKER || is_host_line(trimmed) {
+            let raw = &lines[j];
+            let trimmed = raw.trim();
+            if trimmed.is_empty() || trimmed == CONNECTO_MARKER || is_section_start(trimmed) {
                 break;
             }
+            let indented = raw.starts_with(char::is_whitespace);
             if let Some(value) = key_value(trimmed, "HostName") {
+                if !indented && hostname_idx.is_some() {
+                    break;
+                }
                 entry.hostname = value.to_string();
                 hostname_idx = Some(j);
             } else if let Some(value) = key_value(trimmed, "User") {
+                if !indented && !entry.user.is_empty() {
+                    break;
+                }
                 entry.user = value.to_string();
             } else if let Some(value) = key_value(trimmed, "IdentityFile") {
+                if !indented && !entry.identity_file.is_empty() {
+                    break;
+                }
                 entry.identity_file = value.to_string();
+            } else if !indented {
+                // Un-indented and not a managed key: top-level user config,
+                // not part of the block.
+                break;
             }
             j += 1;
         }
@@ -334,26 +427,42 @@ fn host_alias(trimmed: &str) -> Option<&str> {
     Some(alias)
 }
 
-/// Whether a trimmed line starts a new `Host` block (wildcard or not)
-fn is_host_line(trimmed: &str) -> bool {
-    trimmed == "Host"
-        || trimmed
-            .strip_prefix("Host")
-            .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+/// Whether a trimmed line starts a new top-level section
+///
+/// ssh_config has exactly two section keywords, `Host` and `Match`, and
+/// matches keywords case-insensitively with whitespace or `=` after the
+/// keyword. Either one always terminates the preceding block.
+fn is_section_start(trimmed: &str) -> bool {
+    let keyword = trimmed
+        .split(|c: char| c.is_whitespace() || c == '=')
+        .next()
+        .unwrap_or("");
+    keyword.eq_ignore_ascii_case("Host") || keyword.eq_ignore_ascii_case("Match")
 }
 
 /// If `trimmed` is `<keyword> <value>`, return the value
+///
+/// A value enclosed in double quotes (ssh_config quoting for values with
+/// whitespace) is returned without the quotes.
 fn key_value<'a>(trimmed: &'a str, keyword: &str) -> Option<&'a str> {
     let rest = trimmed.strip_prefix(keyword)?;
     if !rest.starts_with(char::is_whitespace) {
         return None;
     }
-    let value = rest.trim();
+    let value = unquote_value(rest.trim());
     if value.is_empty() {
         None
     } else {
         Some(value)
     }
+}
+
+/// Strip one pair of surrounding double quotes, if present
+fn unquote_value(value: &str) -> &str {
+    value
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .unwrap_or(value)
 }
 
 #[cfg(test)]
@@ -673,5 +782,239 @@ mod tests {
         assert!(json.contains("\"identity_file\""));
         let back: HostEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(back, e);
+    }
+
+    // --- Finding [6]: block termination must not absorb adjacent user config ---
+
+    /// A `Match` block directly after a managed block (no blank separator)
+    /// must never be parsed into, updated, replaced, or removed with it.
+    #[test]
+    fn test_match_block_after_managed_block_is_never_touched() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = config_in(&temp_dir);
+        fs::create_dir_all(config.path().parent().unwrap()).unwrap();
+
+        let match_block =
+            "Match host secret-server\n    User root\n    IdentityFile /k/secret_personal\n";
+        let managed = "# Added by connecto\nHost mydev\n    HostName 1.2.3.4\n    User dev\n    IdentityFile /k/connecto_mydev\n";
+        fs::write(config.path(), format!("{managed}{match_block}")).unwrap();
+
+        // The Match block's options must not leak into the managed entry.
+        let hosts = config.list_hosts().unwrap();
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].user, "dev");
+        assert_eq!(hosts[0].identity_file, "/k/connecto_mydev");
+
+        // update_hostname leaves the Match block byte-intact.
+        config
+            .update_hostname("mydev", "10.0.0.9")
+            .unwrap()
+            .unwrap();
+        assert!(fs::read_to_string(config.path())
+            .unwrap()
+            .contains(match_block));
+
+        // Replace (re-pair) leaves the Match block byte-intact.
+        let mut updated = entry("mydev");
+        updated.identity_file = "/k/connecto_mydev".to_string();
+        assert_eq!(config.add_host(&updated).unwrap(), AddOutcome::Replaced);
+        assert!(fs::read_to_string(config.path())
+            .unwrap()
+            .contains(match_block));
+
+        // Remove leaves exactly the Match block behind.
+        config.remove_host("mydev").unwrap().unwrap();
+        assert_eq!(fs::read_to_string(config.path()).unwrap(), match_block);
+    }
+
+    /// ssh keywords are case-insensitive: a lowercase `match`/`host` line
+    /// must also terminate a managed block.
+    #[test]
+    fn test_lowercase_section_keywords_terminate_block() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = config_in(&temp_dir);
+        fs::create_dir_all(config.path().parent().unwrap()).unwrap();
+
+        let tail = "match all\n    User root\nhost legacy\n    HostName old.example.com\n";
+        fs::write(
+            config.path(),
+            format!(
+                "# Added by connecto\nHost lc\n    HostName 1.2.3.4\n    User dev\n    IdentityFile /k/connecto_lc\n{tail}"
+            ),
+        )
+        .unwrap();
+
+        let hosts = config.list_hosts().unwrap();
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].user, "dev");
+
+        config.remove_host("lc").unwrap().unwrap();
+        assert_eq!(fs::read_to_string(config.path()).unwrap(), tail);
+    }
+
+    /// An un-indented stray top-level line (e.g. a global `IdentityFile`)
+    /// directly after a complete managed block is not absorbed.
+    #[test]
+    fn test_unindented_stray_line_after_block_is_not_absorbed() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = config_in(&temp_dir);
+        fs::create_dir_all(config.path().parent().unwrap()).unwrap();
+
+        let stray = "IdentityFile /k/global_personal\n";
+        fs::write(
+            config.path(),
+            format!(
+                "# Added by connecto\nHost dev2\n    HostName 1.2.3.4\n    User dev\n    IdentityFile /k/connecto_dev2\n{stray}"
+            ),
+        )
+        .unwrap();
+
+        let hosts = config.list_hosts().unwrap();
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].identity_file, "/k/connecto_dev2");
+
+        config.remove_host("dev2").unwrap().unwrap();
+        assert_eq!(fs::read_to_string(config.path()).unwrap(), stray);
+    }
+
+    // --- Finding [8]: replace preserves user-added options in the block ---
+
+    #[test]
+    fn test_replace_preserves_user_added_options_in_block() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = config_in(&temp_dir);
+        fs::create_dir_all(config.path().parent().unwrap()).unwrap();
+
+        fs::write(
+            config.path(),
+            "# Added by connecto\nHost custom\n    HostName 1.2.3.4\n    User dev\n    IdentityFile /k/connecto_custom\n    Port 2222\n    ProxyJump bastion\n",
+        )
+        .unwrap();
+
+        // Re-pair with a changed IP.
+        let mut updated = entry("custom");
+        updated.hostname = "10.0.0.7".to_string();
+        assert_eq!(config.add_host(&updated).unwrap(), AddOutcome::Replaced);
+
+        let content = fs::read_to_string(config.path()).unwrap();
+        assert!(
+            content.contains("    Port 2222"),
+            "Port dropped:\n{content}"
+        );
+        assert!(
+            content.contains("    ProxyJump bastion"),
+            "ProxyJump dropped:\n{content}"
+        );
+        assert_eq!(content.matches(CONNECTO_MARKER).count(), 1);
+
+        let hosts = config.list_hosts().unwrap();
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].hostname, "10.0.0.7");
+
+        // A second replace must not duplicate the preserved options.
+        assert_eq!(config.add_host(&updated).unwrap(), AddOutcome::Replaced);
+        let content = fs::read_to_string(config.path()).unwrap();
+        assert_eq!(content.matches("Port 2222").count(), 1);
+        assert_eq!(content.matches("ProxyJump bastion").count(), 1);
+    }
+
+    // --- Finding [9]: remove_host removes all duplicate same-alias blocks ---
+
+    #[test]
+    fn test_remove_host_removes_all_duplicate_blocks() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = config_in(&temp_dir);
+        fs::create_dir_all(config.path().parent().unwrap()).unwrap();
+
+        fs::write(
+            config.path(),
+            "# Added by connecto\nHost dup\n    HostName 1.1.1.1\n    User a\n    IdentityFile /k/dup1\n\n# Added by connecto\nHost dup\n    HostName 2.2.2.2\n    User b\n    IdentityFile /k/dup2\n",
+        )
+        .unwrap();
+        assert_eq!(config.list_hosts().unwrap().len(), 2);
+
+        // The first removed entry is returned, but BOTH blocks are removed.
+        let removed = config.remove_host("dup").unwrap().unwrap();
+        assert_eq!(removed.hostname, "1.1.1.1");
+
+        assert!(config.list_hosts().unwrap().is_empty());
+        let content = fs::read_to_string(config.path()).unwrap();
+        assert!(!content.contains("dup"), "duplicate survived:\n{content}");
+        assert!(!content.contains(CONNECTO_MARKER));
+    }
+
+    // --- Finding [10]: CRLF configs keep their line endings ---
+
+    #[test]
+    fn test_crlf_round_trip_preserves_line_endings() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = config_in(&temp_dir);
+        fs::create_dir_all(config.path().parent().unwrap()).unwrap();
+
+        let user_block = "Host user\r\n    HostName example.com\r\n";
+        fs::write(
+            config.path(),
+            format!(
+                "{user_block}\r\n# Added by connecto\r\nHost crlf\r\n    HostName 1.2.3.4\r\n    User u\r\n    IdentityFile /k/connecto_crlf\r\n"
+            ),
+        )
+        .unwrap();
+
+        // Append a new entry: the whole file, including the new block, must
+        // stay CRLF.
+        config.add_host(&entry("extra")).unwrap();
+        let content = fs::read_to_string(config.path()).unwrap();
+        assert!(
+            !content.replace("\r\n", "").contains('\n'),
+            "bare LF introduced:\n{content:?}"
+        );
+
+        // Remove both managed entries: the untouched user block survives
+        // byte-for-byte.
+        config.remove_host("extra").unwrap().unwrap();
+        config.remove_host("crlf").unwrap().unwrap();
+        assert_eq!(fs::read_to_string(config.path()).unwrap(), user_block);
+
+        // update_hostname also preserves CRLF.
+        config.add_host(&entry("crlf2")).unwrap();
+        config.update_hostname("crlf2", "9.9.9.9").unwrap().unwrap();
+        let content = fs::read_to_string(config.path()).unwrap();
+        assert!(content.starts_with(user_block));
+        assert!(!content.replace("\r\n", "").contains('\n'));
+    }
+
+    // --- Finding [11]: IdentityFile paths with spaces are quoted ---
+
+    #[test]
+    fn test_identity_file_with_spaces_is_quoted_and_round_trips() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = config_in(&temp_dir);
+
+        let spacey = "/home/alice/my keys/connecto_spacey";
+        let mut e = entry("spacey");
+        e.identity_file = spacey.to_string();
+        config.add_host(&e).unwrap();
+
+        // The written line is double-quoted so ssh parses it as one value.
+        let content = fs::read_to_string(config.path()).unwrap();
+        assert!(
+            content.contains("    IdentityFile \"/home/alice/my keys/connecto_spacey\""),
+            "IdentityFile not quoted:\n{content}"
+        );
+
+        // The parser strips the quotes back off.
+        let hosts = config.list_hosts().unwrap();
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].identity_file, spacey);
+
+        // Replace and remove still find/round-trip the quoted entry.
+        assert_eq!(config.add_host(&e).unwrap(), AddOutcome::Replaced);
+        let removed = config.remove_host("spacey").unwrap().unwrap();
+        assert_eq!(removed.identity_file, spacey);
+
+        // Values without whitespace stay unquoted (legacy on-disk format).
+        config.add_host(&entry("plain")).unwrap();
+        let content = fs::read_to_string(config.path()).unwrap();
+        assert!(!content.contains('"'));
     }
 }

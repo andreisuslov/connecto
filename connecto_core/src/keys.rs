@@ -215,15 +215,22 @@ impl KeyManager {
     /// Save a key pair to disk
     ///
     /// Both files are written atomically; on Unix the private key is created
-    /// with mode `0o600` before any content touches disk.
+    /// with mode `0o600` before any content touches disk. Both files are
+    /// newline-terminated to match `ssh-keygen` output (the private key
+    /// already carries an LF ending from `to_openssh`).
     pub fn save_key_pair(&self, key_pair: &SshKeyPair, name: &str) -> Result<(PathBuf, PathBuf)> {
         self.ensure_ssh_dir()?;
 
         let private_path = self.ssh_dir.join(name);
         let public_path = self.ssh_dir.join(format!("{}.pub", name));
 
+        let mut public_contents = key_pair.public_key.clone();
+        if !public_contents.ends_with('\n') {
+            public_contents.push('\n');
+        }
+
         fsutil::write_atomic(&private_path, &key_pair.private_key)?;
-        fsutil::write_atomic(&public_path, &key_pair.public_key)?;
+        fsutil::write_atomic(&public_path, &public_contents)?;
 
         Ok((private_path, public_path))
     }
@@ -253,7 +260,13 @@ impl KeyManager {
     /// The file is rewritten atomically (created `0o600` on Unix). Keys are
     /// deduplicated by exact key-blob comparison, so a key whose blob is a
     /// prefix of an existing one is still added.
-    pub fn add_authorized_key(&self, public_key: &str) -> Result<()> {
+    ///
+    /// Returns `Ok(true)` when the key was actually appended and `Ok(false)`
+    /// when the exact key blob was already authorized (the file is left
+    /// untouched). Callers that roll a failed exchange back MUST only remove
+    /// the key when this returned `true`, or they would revoke a key that
+    /// predates the exchange.
+    pub fn add_authorized_key(&self, public_key: &str) -> Result<bool> {
         self.ensure_ssh_dir()?;
 
         let auth_keys_path = self.authorized_keys_path();
@@ -277,7 +290,7 @@ impl KeyManager {
                 .lines()
                 .any(|line| key_blob(line) == Some(new_blob))
             {
-                return Ok(());
+                return Ok(false);
             }
         }
 
@@ -299,7 +312,7 @@ impl KeyManager {
             }
         }
 
-        Ok(())
+        Ok(true)
     }
 
     /// Set proper ACL permissions on Windows admin authorized_keys file
@@ -505,9 +518,13 @@ mod tests {
 
         let private_content = fs::read_to_string(&private_path).unwrap();
         assert!(private_content.contains("OPENSSH PRIVATE KEY"));
+        assert!(private_content.ends_with('\n'));
 
         let public_content = fs::read_to_string(&public_path).unwrap();
         assert!(public_content.starts_with("ssh-ed25519 "));
+        // Newline-terminated like ssh-keygen output, but only once
+        assert!(public_content.ends_with('\n'));
+        assert!(!public_content.ends_with("\n\n"));
     }
 
     #[test]
@@ -518,7 +535,8 @@ mod tests {
         let manager = KeyManager::with_dir(ssh_dir);
         let key_pair = SshKeyPair::generate(KeyAlgorithm::Ed25519, "test@connecto").unwrap();
 
-        manager.add_authorized_key(&key_pair.public_key).unwrap();
+        let added = manager.add_authorized_key(&key_pair.public_key).unwrap();
+        assert!(added, "a new key must report that it was added");
 
         let keys = manager.list_authorized_keys().unwrap();
         assert_eq!(keys.len(), 1);
@@ -533,8 +551,10 @@ mod tests {
         let manager = KeyManager::with_dir(ssh_dir);
         let key_pair = SshKeyPair::generate(KeyAlgorithm::Ed25519, "test@connecto").unwrap();
 
-        manager.add_authorized_key(&key_pair.public_key).unwrap();
-        manager.add_authorized_key(&key_pair.public_key).unwrap(); // Add again
+        assert!(manager.add_authorized_key(&key_pair.public_key).unwrap());
+        // Adding again must report "already present" so rollback paths know
+        // the exchange did not actually install anything.
+        assert!(!manager.add_authorized_key(&key_pair.public_key).unwrap());
 
         let keys = manager.list_authorized_keys().unwrap();
         assert_eq!(keys.len(), 1); // Should still be only 1

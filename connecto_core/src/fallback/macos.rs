@@ -119,24 +119,19 @@ impl AdHocBackend for MacosBackend {
     fn join_network(&mut self, ssid: &str) -> Result<AdHocOutcome> {
         let interface = self.interface()?;
 
-        let output = Command::new("networksetup")
-            .args(["-setairportnetwork", &interface.device, ssid])
-            .output()
-            .map_err(|e| ConnectoError::Network(format!("Failed to join network: {}", e)))?;
-
-        // networksetup reports some join failures on stdout with exit code 0
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if !output.status.success()
-            || stdout.contains("Could not find network")
-            || stdout.contains("Failed to join")
-        {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ConnectoError::Network(format!(
-                "Failed to join network '{}': {} {}",
-                ssid,
-                stdout.trim(),
-                stderr.trim()
-            )));
+        // Try as an open network first (macOS/Linux hosts create open
+        // networks); on failure retry with the WPA2 key a Windows host
+        // protects its hosted network with (derived from the SSID on both
+        // sides).
+        if let Err(open_err) = try_join(&interface.device, ssid, None) {
+            let password = super::derive_join_password(ssid);
+            if let Err(keyed_err) = try_join(&interface.device, ssid, Some(&password)) {
+                return Err(ConnectoError::Network(format!(
+                    "Failed to join network '{}': {} (retry with the derived \
+                     Connecto password also failed: {})",
+                    ssid, open_err, keyed_err
+                )));
+            }
         }
 
         // Configure the client side of the rendezvous subnet
@@ -321,6 +316,33 @@ fn confirm_associated(device: &str, ssid: &str) -> bool {
         }
     }
     false
+}
+
+/// Run `networksetup -setairportnetwork` (optionally with a password),
+/// detecting the failures it reports on stdout with exit code 0
+fn try_join(device: &str, ssid: &str, password: Option<&str>) -> std::result::Result<(), String> {
+    let mut args = vec!["-setairportnetwork", device, ssid];
+    if let Some(password) = password {
+        args.push(password);
+    }
+
+    let output = Command::new("networksetup")
+        .args(&args)
+        .output()
+        .map_err(|e| format!("Failed to run networksetup: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success()
+        || stdout.contains("Could not find network")
+        || stdout.contains("Failed to join")
+    {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("{} {}", stdout.trim(), stderr.trim())
+            .trim()
+            .to_string());
+    }
+
+    Ok(())
 }
 
 /// Pin a static IP on the rendezvous subnet

@@ -63,7 +63,7 @@ Each pairing request must be approved before anything is installed:
 Pairing approval required
   • Device:      my-laptop
   • Key comment: user@my-laptop
-  • Fingerprint: SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8
+  • Fingerprint: SHA256:mTiqtUQvo0mB/zDzQbxahaBBq+KJ62pV8ECXptWqzLg
   • Code:        627765
   Compare the code with the one shown on the pairing device.
 Approve this pairing? [y/N]
