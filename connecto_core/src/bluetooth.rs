@@ -396,6 +396,9 @@ impl BluetoothBrowser {
 /// On non-Linux platforms, all methods return "not supported" errors.
 #[cfg(target_os = "linux")]
 pub struct BluetoothAdvertiser {
+    // Held for the advertiser's lifetime to keep the BlueZ D-Bus connection
+    // alive; not read directly after construction.
+    #[allow(dead_code)]
     session: bluer::Session,
     adapter: bluer::Adapter,
     advertisement_handle: Option<bluer::adv::AdvertisementHandle>,
