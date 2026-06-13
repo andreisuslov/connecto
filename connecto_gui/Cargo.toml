@@ -21,6 +21,7 @@ connecto_core = { path = "../connecto_core" }
 tauri = { version = "1.6", features = ["shell-open"] }
 serde = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]

@@ -153,7 +153,7 @@ pub async fn run(
 
     // Run sync with Ctrl+C handling
     let result = tokio::select! {
-        result = handler.run(port, timeout_secs, event_tx) => result,
+        result = handler.run(port, timeout_secs, event_tx, None) => result,
         _ = tokio::signal::ctrl_c() => {
             println!();
             info("Sync cancelled by user");

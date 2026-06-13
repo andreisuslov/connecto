@@ -11,6 +11,7 @@ bluetooth = ["dep:btleplug", "dep:uuid", "dep:bluer"]
 
 [dependencies]
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 mdns-sd = { workspace = true }
 ssh-key = { workspace = true }
 rand = { workspace = true }

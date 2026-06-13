@@ -34,7 +34,7 @@ export function ListenTab() {
 
   useEffect(() => {
     loadInitialData();
-    checkListenerStatus();
+    restoreListenerStatus();
   }, []);
 
   // Poll listener activity (connections, key exchanges) while listening
@@ -70,12 +70,23 @@ export function ListenTab() {
     }
   };
 
-  const checkListenerStatus = async () => {
+  // Restore the full listener state on mount/remount (not just the boolean),
+  // so returning to this tab during an active listen shows the correct port,
+  // device name, and last event rather than stale defaults.
+  const restoreListenerStatus = async () => {
     try {
-      const status = await invoke<boolean>('get_listener_status');
-      setIsListening(status);
+      const info = await invoke<ListenerInfo>('get_listener_info');
+      setIsListening(info.listening);
+      if (info.listening) {
+        setListenerInfo({ device_name: info.device_name, port: info.port });
+        setLastEvent(info.last_event);
+        if (info.device_name) {
+          setDeviceName(info.device_name);
+        }
+        setPort(String(info.port));
+      }
     } catch (error) {
-      console.error('Failed to check listener status:', error);
+      console.error('Failed to restore listener status:', error);
     }
   };
 

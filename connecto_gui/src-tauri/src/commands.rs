@@ -18,9 +18,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::State;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio_util::sync::CancellationToken;
 
-use crate::state::{AppState, ListenerHandle, SyncStatus};
+use crate::state::{AppState, ListenerHandle, SyncStatus, SyncTaskHandle};
 
 /// Device info for the frontend
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -202,8 +203,14 @@ fn listener_event_message(event: &ServerEvent) -> String {
 }
 
 /// Apply a `SyncEvent` to the shared sync status
+///
+/// Progress events keep `is_syncing` true so a UI that mounts (or remounts)
+/// mid-run sees the in-progress state authoritatively via `get_sync_status`.
+/// The terminal status is committed by `finalize_sync_run`, which also clears
+/// the task slot; this only mirrors progress.
 async fn apply_sync_event(status: &Arc<Mutex<SyncStatus>>, event: SyncEvent) {
     let mut status = status.lock().await;
+    status.is_syncing = true;
     match event {
         SyncEvent::Started { address } => {
             status.phase = "started".to_string();
@@ -237,12 +244,17 @@ async fn apply_sync_event(status: &Arc<Mutex<SyncStatus>>, event: SyncEvent) {
             status.phase = "key-accepted".to_string();
             status.status_message = "Our key was accepted by the peer".to_string();
         }
+        // Terminal events: clear is_syncing. `finalize_sync_run` writes the
+        // definitive terminal status afterward; these arms just avoid a stale
+        // is_syncing:true between the event and finalization.
         SyncEvent::Completed { peer_name, .. } => {
+            status.is_syncing = false;
             status.phase = "completed".to_string();
             status.status_message = format!("Sync completed with {}", peer_name);
             status.peer_name = Some(peer_name);
         }
         SyncEvent::Failed { message } => {
+            status.is_syncing = false;
             status.phase = "failed".to_string();
             status.status_message = format!("Sync failed: {}", message);
         }
@@ -344,9 +356,18 @@ pub async fn pair_with_address(
         format!("{}@{}", user, hostname)
     });
 
-    // Use the configured default key if set, otherwise generate a new pair
-    let user_config = Config::load().unwrap_or_default();
-    let (key_pair, existing_key_path) = resolve_key_pair(&user_config, use_rsa, &comment)?;
+    // Use the configured default key if set, otherwise generate a new pair.
+    // Config::load reads from disk and RSA-4096 keygen can pin a CPU for
+    // seconds, so resolve the key off the async runtime.
+    let (key_pair, existing_key_path) = {
+        let comment = comment.clone();
+        tokio::task::spawn_blocking(move || {
+            let user_config = Config::load().unwrap_or_default();
+            resolve_key_pair(&user_config, use_rsa, &comment)
+        })
+        .await
+        .map_err(|e| e.to_string())??
+    };
 
     // Create client and pair
     let client = HandshakeClient::new(&get_hostname());
@@ -354,40 +375,50 @@ pub async fn pair_with_address(
 
     match result {
         Ok(pairing_result) => {
-            let alias = sanitize_device_name(&pairing_result.server_name);
+            let ip = address.split(':').next().unwrap_or(&address).to_string();
 
-            // Use the existing key's path, or save the generated key under the
-            // CLI naming convention
-            let (private_path, public_path) = match &existing_key_path {
-                Some(path) => (
-                    path.clone(),
-                    PathBuf::from(format!("{}.pub", path.display())),
-                ),
-                None => {
-                    let key_manager = KeyManager::new().map_err(|e| e.to_string())?;
-                    let key_name = format!("connecto_{}", alias);
-                    key_manager
-                        .save_key_pair(&key_pair, &key_name)
-                        .map_err(|e| e.to_string())?
-                }
+            // Persist the key (if generated) and write the ~/.ssh/config entry.
+            // Both do atomic writes with fsync (F_FULLFSYNC on macOS), so run
+            // them off the async runtime.
+            let (private_path, public_path, host_alias) = {
+                let server_name = pairing_result.server_name.clone();
+                let ssh_user = pairing_result.ssh_user.clone();
+                let ip = ip.clone();
+                let existing_key_path = existing_key_path.clone();
+                let key_pair = key_pair.clone();
+                tokio::task::spawn_blocking(move || -> Result<_, String> {
+                    let alias = sanitize_device_name(&server_name);
+                    let (private_path, public_path) = match &existing_key_path {
+                        Some(path) => (
+                            path.clone(),
+                            PathBuf::from(format!("{}.pub", path.display())),
+                        ),
+                        None => {
+                            let key_manager = KeyManager::new().map_err(|e| e.to_string())?;
+                            let key_name = format!("connecto_{}", alias);
+                            key_manager
+                                .save_key_pair(&key_pair, &key_name)
+                                .map_err(|e| e.to_string())?
+                        }
+                    };
+
+                    // Write the ~/.ssh/config entry so `ssh <alias>` works
+                    let host_alias =
+                        write_host_entry_at_default(&server_name, &ip, &ssh_user, &private_path)
+                            .ok();
+
+                    Ok((private_path, public_path, host_alias))
+                })
+                .await
+                .map_err(|e| e.to_string())??
             };
 
-            let ip = address.split(':').next().unwrap_or(&address);
             let ssh_command = format!(
                 "ssh -i {} {}@{}",
                 private_path.display(),
                 pairing_result.ssh_user,
                 ip
             );
-
-            // Write the ~/.ssh/config entry so `ssh <alias>` works, like the CLI
-            let host_alias = write_host_entry_at_default(
-                &pairing_result.server_name,
-                ip,
-                &pairing_result.ssh_user,
-                &private_path,
-            )
-            .ok();
 
             Ok(PairingInfo {
                 success: true,
@@ -432,10 +463,13 @@ pub async fn start_listener(
             return Err("Listener is already running".to_string());
         }
     }
-    // Clean up a previously crashed/finished listener before restarting
+    // Clean up a previously crashed/finished listener before restarting.
+    // Dropping the old handle drops its advertiser (stopping the stale mDNS
+    // announcement) and its task handles; the server task has already
+    // finished, so nothing is interrupted mid-handshake.
     if let Some(old) = listener_guard.take() {
-        old.server_task.abort();
         old.event_task.abort();
+        drop(old);
     }
 
     // Bind first; only advertise once the socket is actually listening
@@ -458,10 +492,13 @@ pub async fn start_listener(
         }
     });
 
-    // Drive the handshake server until stopped
+    // Drive the handshake server until stopped via the shutdown signal. Using
+    // `run_with_shutdown` (rather than aborting the task) lets in-flight
+    // handshakes drain instead of being cancelled mid-install.
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let activity = Arc::clone(&state.listener_activity);
     let server_task = tokio::spawn(async move {
-        if let Err(e) = server.run(event_tx).await {
+        if let Err(e) = server.run_with_shutdown(event_tx, shutdown_rx).await {
             *activity.lock().await = Some(format!("Listener stopped: {}", e));
         }
     });
@@ -470,6 +507,7 @@ pub async fn start_listener(
     *listener_guard = Some(ListenerHandle {
         advertiser,
         server_task,
+        shutdown: Some(shutdown_tx),
         event_task,
         port: addr.port(),
         device_name: name.clone(),
@@ -494,8 +532,10 @@ pub async fn start_listener(
 
 /// Stop the listener server
 ///
-/// Aborts the server task (closing the socket), waits for it to finish, then
-/// stops mDNS advertising before reporting stopped.
+/// Fires the graceful shutdown signal so `run_with_shutdown` stops accepting
+/// and DRAINS any in-flight handshakes (the core guarantee: a half-installed
+/// key can never result from stopping), awaits the server task, then aborts
+/// the now-idle event-consumer task and unregisters mDNS.
 #[tauri::command]
 pub async fn stop_listener(state: State<'_, AppState>) -> Result<(), String> {
     let handle = state.listener.lock().await.take();
@@ -504,15 +544,21 @@ pub async fn stop_listener(state: State<'_, AppState>) -> Result<(), String> {
         let ListenerHandle {
             mut advertiser,
             server_task,
+            mut shutdown,
             event_task,
             ..
         } = handle;
 
-        server_task.abort();
-        event_task.abort();
-        // Wait for the tasks to actually terminate so the socket is closed
-        // before we report the listener as stopped.
+        // Trigger the graceful path; dropping the sender also signals close,
+        // but firing it explicitly is clearer.
+        if let Some(tx) = shutdown.take() {
+            let _ = tx.send(());
+        }
+        // Wait for the server to stop accepting and drain in-flight
+        // handshakes before reporting stopped. Only then abort the event
+        // consumer (the server task no longer sends events).
         let _ = server_task.await;
+        event_task.abort();
         let _ = event_task.await;
 
         // Unregister the mDNS service; dropping the advertiser also shuts
@@ -524,21 +570,44 @@ pub async fn stop_listener(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// Drop a dead listener handle if its server task has already finished
+///
+/// Self-heal for a crashed/exited listener: dropping the whole `ListenerHandle`
+/// drops the `ServiceAdvertiser` (whose `Drop` unregisters the mDNS service and
+/// shuts the daemon down), so observing a finished server here also stops the
+/// ghost `_connecto._tcp` announcement instead of leaving it broadcasting until
+/// the next manual start. Returns whether a live listener remains.
+fn reap_dead_listener(guard: &mut Option<ListenerHandle>) -> bool {
+    match guard.as_ref() {
+        Some(h) if h.server_task.is_finished() => {
+            if let Some(dead) = guard.take() {
+                dead.event_task.abort();
+                drop(dead);
+            }
+            false
+        }
+        Some(_) => true,
+        None => false,
+    }
+}
+
 /// Get listening status
 #[tauri::command]
 pub async fn get_listener_status(state: State<'_, AppState>) -> Result<bool, String> {
-    let guard = state.listener.lock().await;
-    Ok(guard.as_ref().is_some_and(|h| !h.server_task.is_finished()))
+    let mut guard = state.listener.lock().await;
+    Ok(reap_dead_listener(&mut guard))
 }
 
 /// Get detailed listener status, including the most recent listener event
 #[tauri::command]
 pub async fn get_listener_info(state: State<'_, AppState>) -> Result<ServerStatus, String> {
     let (listening, port, device_name) = {
-        let guard = state.listener.lock().await;
-        match guard.as_ref() {
-            Some(h) if !h.server_task.is_finished() => (true, h.port, h.device_name.clone()),
-            _ => (false, 0, String::new()),
+        let mut guard = state.listener.lock().await;
+        if reap_dead_listener(&mut guard) {
+            let h = guard.as_ref().expect("live listener present");
+            (true, h.port, h.device_name.clone())
+        } else {
+            (false, 0, String::new())
         }
     };
 
@@ -897,33 +966,50 @@ pub async fn start_sync(
         .unwrap_or_else(|_| "user".to_string());
     let comment = format!("{}@{}", user, name);
 
-    // Use the configured default key if set, otherwise generate a new pair
-    let user_config = Config::load().unwrap_or_default();
-    let (key_pair, existing_key_path) = resolve_key_pair(&user_config, use_rsa, &comment)?;
+    // Resolve, persist (if generated) the key, and compute its private path.
+    // Config::load, RSA-4096 keygen, and save_key_pair (atomic write + fsync)
+    // all block, so run them off the async runtime.
+    let (key_pair, private_path) = {
+        let name = name.clone();
+        let comment = comment.clone();
+        tokio::task::spawn_blocking(move || -> Result<_, String> {
+            let user_config = Config::load().unwrap_or_default();
+            let (key_pair, existing_key_path) = resolve_key_pair(&user_config, use_rsa, &comment)?;
 
-    // The actual private key path, used for the SSH config entry below
-    let private_path = match &existing_key_path {
-        Some(path) => path.clone(),
-        None => {
-            let key_manager = KeyManager::new().map_err(|e| e.to_string())?;
-            let key_name = format!("connecto_sync_{}", sanitize_device_name(&name));
-            let (private_path, _) = key_manager
-                .save_key_pair(&key_pair, &key_name)
-                .map_err(|e| e.to_string())?;
-            private_path
-        }
+            let private_path = match &existing_key_path {
+                Some(path) => path.clone(),
+                None => {
+                    let key_manager = KeyManager::new().map_err(|e| e.to_string())?;
+                    let key_name = format!("connecto_sync_{}", sanitize_device_name(&name));
+                    let (private_path, _) = key_manager
+                        .save_key_pair(&key_pair, &key_name)
+                        .map_err(|e| e.to_string())?;
+                    private_path
+                }
+            };
+            Ok((key_pair, private_path))
+        })
+        .await
+        .map_err(|e| e.to_string())??
     };
 
     let sync_key_manager = KeyManager::new().map_err(|e| e.to_string())?;
     let handler = SyncHandler::new(sync_key_manager, &name, key_pair);
 
     // Spawn the sync task while holding the task slot, so two concurrent
-    // start_sync calls cannot both start.
-    let (sync_task, event_task) = {
+    // start_sync calls cannot both start. Each run gets a unique id so a stale
+    // completion handler can never clobber a newer run's status/slot.
+    let (sync_task, event_task, run_id) = {
         let mut task_guard = state.sync_task.lock().await;
         if task_guard.is_some() {
             return Err("Sync operation already in progress".to_string());
         }
+
+        let run_id = {
+            let mut counter = state.sync_run_counter.lock().await;
+            *counter += 1;
+            *counter
+        };
 
         {
             let mut status = state.sync_status.lock().await;
@@ -944,31 +1030,35 @@ pub async fn start_sync(
             }
         });
 
-        let sync_task =
-            tokio::spawn(async move { handler.run(port, timeout_secs, event_tx).await });
-        *task_guard = Some(sync_task.abort_handle());
-        (sync_task, event_task)
+        // Cooperative cancellation: cancel_sync fires this token so the sync
+        // stops at a safe point (never mid-exchange). The slot keeps a clone
+        // for cancel_sync to fire; the task gets the other.
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let sync_task = tokio::spawn(async move {
+            handler
+                .run(port, timeout_secs, event_tx, Some(task_cancel))
+                .await
+        });
+        *task_guard = Some(SyncTaskHandle { cancel, run_id });
+        (sync_task, event_task, run_id)
     };
 
-    // Wait for the sync task to finish (or be aborted by cancel_sync)
+    // Wait for the sync task to finish (cooperatively cancelled or completed)
     let run_result = sync_task.await;
-
-    // The task is done; release the slot and only now flip the status
-    *state.sync_task.lock().await = None;
     event_task.abort();
 
+    // Compute the terminal status, then commit it BEFORE releasing the slot,
+    // and only if this run still owns the slot. A newer start_sync that
+    // replaced the slot must not have its fresh "starting" status overwritten
+    // by this (now stale) run's completion.
     let result = match run_result {
         Ok(result) => result,
         Err(join_error) => {
-            let message = if join_error.is_cancelled() {
-                "Sync cancelled".to_string()
-            } else {
-                format!("Sync task failed: {}", join_error)
-            };
-            let mut status = state.sync_status.lock().await;
-            status.is_syncing = false;
-            status.phase = "cancelled".to_string();
-            status.status_message = message.clone();
+            // The task is no longer aborted on cancel, so a JoinError here is
+            // an unexpected panic.
+            let message = format!("Sync task failed: {}", join_error);
+            finalize_sync_run(&state, run_id, "failed", &message, None).await;
             return Ok(SyncResultInfo::failure(message));
         }
     };
@@ -983,22 +1073,35 @@ pub async fn start_sync(
                 peer_address
             );
 
-            // Write the ~/.ssh/config entry so `ssh <alias>` works, like the CLI
-            let host_alias = write_host_entry_at_default(
-                &sync_result.peer_name,
-                &peer_address,
-                &sync_result.peer_user,
-                &private_path,
-            )
-            .ok();
+            // Write the ~/.ssh/config entry so `ssh <alias>` works, like the
+            // CLI. This is blocking fs IO (atomic write + fsync), so run it off
+            // the async runtime.
+            let host_alias = {
+                let device_name = sync_result.peer_name.clone();
+                let peer_address = peer_address.clone();
+                let peer_user = sync_result.peer_user.clone();
+                let private_path = private_path.clone();
+                tokio::task::spawn_blocking(move || {
+                    write_host_entry_at_default(
+                        &device_name,
+                        &peer_address,
+                        &peer_user,
+                        &private_path,
+                    )
+                })
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+            };
 
-            {
-                let mut status = state.sync_status.lock().await;
-                status.is_syncing = false;
-                status.phase = "completed".to_string();
-                status.status_message = format!("Sync completed with {}!", sync_result.peer_name);
-                status.peer_name = Some(sync_result.peer_name.clone());
-            }
+            finalize_sync_run(
+                &state,
+                run_id,
+                "completed",
+                &format!("Sync completed with {}!", sync_result.peer_name),
+                Some(sync_result.peer_name.clone()),
+            )
+            .await;
 
             Ok(SyncResultInfo {
                 success: true,
@@ -1011,16 +1114,60 @@ pub async fn start_sync(
             })
         }
         Err(e) => {
-            {
-                let mut status = state.sync_status.lock().await;
-                status.is_syncing = false;
-                status.phase = "failed".to_string();
-                status.status_message = format!("Sync failed: {}", e);
-            }
+            // A cooperative cancel surfaces as a SyncError; report it as
+            // cancelled rather than a hard failure.
+            let cancelled = matches!(
+                &e,
+                connecto_core::error::ConnectoError::Sync(msg) if msg == "Sync cancelled"
+            );
+            let (phase, message) = if cancelled {
+                ("cancelled", "Sync cancelled".to_string())
+            } else {
+                ("failed", format!("Sync failed: {}", e))
+            };
+            finalize_sync_run(&state, run_id, phase, &message, None).await;
 
-            Ok(SyncResultInfo::failure(e.to_string()))
+            Ok(SyncResultInfo::failure(if cancelled {
+                "Sync cancelled".to_string()
+            } else {
+                e.to_string()
+            }))
         }
     }
+}
+
+/// Commit a sync run's terminal status, then release the task slot
+///
+/// Both steps are guarded by `run_id`: if a newer `start_sync` already replaced
+/// the slot (a fast cancel-then-restart), this stale run leaves both the status
+/// and the slot untouched, so the newer run's "starting" state survives. Status
+/// is written before the slot is cleared so the slot is never empty while the
+/// status still reads `is_syncing: true`.
+async fn finalize_sync_run(
+    state: &AppState,
+    run_id: u64,
+    phase: &str,
+    message: &str,
+    peer_name: Option<String>,
+) {
+    let mut task_guard = state.sync_task.lock().await;
+    let owns_slot = task_guard.as_ref().is_some_and(|h| h.run_id == run_id);
+    if !owns_slot {
+        // A newer run took over; do not touch its status or slot.
+        return;
+    }
+
+    {
+        let mut status = state.sync_status.lock().await;
+        status.is_syncing = false;
+        status.phase = phase.to_string();
+        status.status_message = message.to_string();
+        if let Some(peer) = peer_name {
+            status.peer_name = Some(peer);
+        }
+    }
+
+    *task_guard = None;
 }
 
 /// Get sync status
@@ -1037,13 +1184,15 @@ pub async fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatusInf
 
 /// Cancel sync operation
 ///
-/// Aborts the running sync task; the status flips only once the task has
-/// actually finished (handled by `start_sync`'s completion path).
+/// Fires the run's cancellation token instead of aborting the task, so an
+/// in-flight key exchange runs to its rollback-protected completion while
+/// discovery and any not-yet-started attempt stop. The status flips only once
+/// the task actually returns (handled by `start_sync`'s completion path).
 #[tauri::command]
 pub async fn cancel_sync(state: State<'_, AppState>) -> Result<(), String> {
     let task_guard = state.sync_task.lock().await;
     if let Some(handle) = task_guard.as_ref() {
-        handle.abort();
+        handle.cancel.cancel();
     }
     Ok(())
 }

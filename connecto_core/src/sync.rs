@@ -19,6 +19,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 /// Service type for sync discovery (different from regular pairing)
@@ -131,11 +132,18 @@ impl SyncHandler {
     /// 5. Exchange keys bidirectionally; a failed install on either side
     ///    prevents (or rolls back) the other side's install, so an aborted
     ///    exchange leaves no one-sided SSH access behind
+    ///
+    /// When `cancel` is supplied and fired, the run stops discovery and any
+    /// not-yet-started attempt at the next safe point (the waiting-for-peer
+    /// loop). An exchange already in flight is left to run to its existing
+    /// rollback-protected completion, so cancellation can never strand a
+    /// half-installed key. Callers that never cancel pass `None`.
     pub async fn run(
         &self,
         port: u16,
         timeout_secs: u64,
         event_tx: mpsc::Sender<SyncEvent>,
+        cancel: Option<CancellationToken>,
     ) -> Result<SyncResult> {
         // Start listening
         let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
@@ -172,7 +180,14 @@ impl SyncHandler {
         let peer_rx = browser.browse()?;
 
         let result = self
-            .run_loop(listener, peer_rx, our_priority, timeout_secs, event_tx)
+            .run_loop(
+                listener,
+                peer_rx,
+                our_priority,
+                timeout_secs,
+                event_tx,
+                cancel,
+            )
             .await;
 
         // Cleanup. Dropping the browser (and advertiser) shuts their mDNS
@@ -199,6 +214,7 @@ impl SyncHandler {
         our_priority: u64,
         timeout_secs: u64,
         event_tx: mpsc::Sender<SyncEvent>,
+        cancel: Option<CancellationToken>,
     ) -> Result<SyncResult> {
         // Prepare our SSH user
         let ssh_user = std::env::var("USER")
@@ -212,8 +228,28 @@ impl SyncHandler {
         // string); repeated DeviceFound events must not spawn parallel chains.
         let mut initiating: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+        // Cancellation is observed only here, at the loop's safe point: it
+        // never interrupts an in-flight exchange (those run on `attempts`
+        // tasks to their rollback-protected completion). Without a token this
+        // arm never resolves.
+        let cancelled = async move {
+            match &cancel {
+                Some(token) => token.cancelled().await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::pin!(cancelled);
+
         loop {
             tokio::select! {
+                // Cooperative cancellation: stop discovery and any
+                // not-yet-started attempt. An exchange already in flight is
+                // left to finish (or roll back) on its `attempts` task.
+                _ = &mut cancelled => {
+                    debug!("Sync cancellation requested; stopping discovery");
+                    break Err(ConnectoError::Sync("Sync cancelled".to_string()));
+                }
+
                 // Overall timeout
                 _ = tokio::time::sleep_until(deadline) => {
                     let _ = event_tx.send(SyncEvent::Failed {
@@ -855,7 +891,7 @@ mod tests {
             let handler = handler_a.clone();
             tokio::spawn(async move {
                 handler
-                    .run_loop(listener_a, peer_rx_a, priority_a, 10, event_tx_a)
+                    .run_loop(listener_a, peer_rx_a, priority_a, 10, event_tx_a, None)
                     .await
             })
         };
@@ -863,7 +899,7 @@ mod tests {
             let handler = handler_b.clone();
             tokio::spawn(async move {
                 handler
-                    .run_loop(listener_b, peer_rx_b, priority_b, 10, event_tx_b)
+                    .run_loop(listener_b, peer_rx_b, priority_b, 10, event_tx_b, None)
                     .await
             })
         };
@@ -1090,7 +1126,7 @@ mod tests {
             .unwrap();
 
         let result = handler
-            .run_loop(listener, peer_rx, 42, 15, event_tx)
+            .run_loop(listener, peer_rx, 42, 15, event_tx, None)
             .await
             .expect("a declined initiation must be retried until it succeeds");
         assert_eq!(result.peer_name, "Responder");
@@ -1102,6 +1138,43 @@ mod tests {
             .unwrap();
         assert_eq!(keys.len(), 1);
         assert!(keys[0].contains("bob@responder"));
+    }
+
+    /// Firing the cancellation token while the loop is waiting for a peer must
+    /// stop the run promptly (well before the deadline) with no key installed.
+    #[tokio::test]
+    async fn test_run_loop_cancellation_stops_waiting_loop() {
+        let temp_dir = TempDir::new().unwrap();
+        let ssh_dir = temp_dir.path().join(".ssh");
+        let key_pair = SshKeyPair::generate(KeyAlgorithm::Ed25519, "alice@initiator").unwrap();
+        let handler =
+            SyncHandler::new(KeyManager::with_dir(ssh_dir.clone()), "Initiator", key_pair);
+
+        // No peer is ever discovered; without cancellation this would run for
+        // the full (large) timeout.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (_peer_tx, peer_rx) = mpsc::channel(4);
+        let (event_tx, _event_rx) = mpsc::channel(64);
+
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel_clone.cancel();
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            handler.run_loop(listener, peer_rx, 42, 3600, event_tx, Some(cancel)),
+        )
+        .await
+        .expect("cancellation must stop the loop long before the deadline");
+
+        assert!(matches!(result, Err(ConnectoError::Sync(_))));
+        let keys = KeyManager::with_dir(ssh_dir)
+            .list_authorized_keys()
+            .unwrap();
+        assert!(keys.is_empty(), "cancellation must install no key");
     }
 
     /// Regression for the rollback-removes-pre-existing-key bug: when the

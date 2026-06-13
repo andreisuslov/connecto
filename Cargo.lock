@@ -619,6 +619,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
 ]
@@ -633,6 +634,7 @@ dependencies = [
  "tauri-build",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing-subscriber",
 ]
 

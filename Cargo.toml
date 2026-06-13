@@ -16,6 +16,7 @@ description = "AirDrop-like SSH pairing application"
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
+tokio-util = "0.7"
 
 # mDNS discovery
 mdns-sd = "0.11"
