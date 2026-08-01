@@ -581,7 +581,7 @@ dependencies = [
 
 [[package]]
 name = "connecto_cli"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -603,7 +603,7 @@ dependencies = [
 
 [[package]]
 name = "connecto_core"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "bluer",
  "btleplug",
@@ -626,7 +626,7 @@ dependencies = [
 
 [[package]]
 name = "connecto_gui"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "connecto_core",
  "serde",
