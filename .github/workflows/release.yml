@@ -32,6 +32,21 @@ jobs:
             os: windows-latest
             archive: zip
             asset_name: connecto-windows-x86_64
+            # Statically link the MSVC C runtime.
+            #
+            # connecto's job is bootstrapping SSH access onto machines that were
+            # just provisioned, but a dynamically linked build imports
+            # VCRUNTIME140.dll from the Visual C++ Redistributable, which fresh
+            # Windows images (Server 2025 among them) do not ship. The failure
+            # mode is hostile: the process cannot start, so it prints nothing at
+            # all and only sets exit code 0xC0000135 (STATUS_DLL_NOT_FOUND) -
+            # indistinguishable from a command that silently did nothing.
+            #
+            # Safe here because this job passes --target explicitly, so the flag
+            # applies to the target only and not to host build scripts or
+            # proc-macro crates. Do not move this into .cargo/config.toml: CI
+            # builds without --target, where it would hit host units too.
+            rustflags: "-C target-feature=+crt-static"
 
     steps:
       - uses: actions/checkout@v4
@@ -65,7 +80,66 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build
+        env:
+          # Empty for every target that does not set it, which cargo treats as no flags.
+          RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --release --target ${{ matrix.target }} --package connecto_cli
+
+      - name: Verify Windows binary is self-contained
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          # Guards a regression that is invisible on any dev machine: a dynamically
+          # linked build only fails on a host lacking the VC++ Redistributable, and
+          # it fails silently there (0xC0000135, no output). Reads the PE import
+          # table directly rather than shelling out to dumpbin, which is not
+          # reliably on PATH on hosted runners.
+          $exe = "target/${{ matrix.target }}/release/connecto.exe"
+          $b = [IO.File]::ReadAllBytes($exe)
+          $e = [BitConverter]::ToInt32($b, 0x3C)
+          if ([BitConverter]::ToUInt32($b, $e) -ne 0x00004550) { throw "not a PE file: $exe" }
+          $nsec  = [BitConverter]::ToUInt16($b, $e + 6)
+          $optsz = [BitConverter]::ToUInt16($b, $e + 20)
+          $opt   = $e + 24
+          $magic = [BitConverter]::ToUInt16($b, $opt)
+          $ddoff = $opt + $(if ($magic -eq 0x20b) { 112 } else { 96 })
+          $impRva = [BitConverter]::ToUInt32($b, $ddoff + 8)
+          $secTab = $e + 24 + $optsz
+          $secs = @()
+          for ($i = 0; $i -lt $nsec; $i++) {
+            $o = $secTab + $i * 40
+            $secs += [pscustomobject]@{
+              Va  = [BitConverter]::ToUInt32($b, $o + 12)
+              Vsz = [BitConverter]::ToUInt32($b, $o + 8)
+              Ptr = [BitConverter]::ToUInt32($b, $o + 20)
+              Rsz = [BitConverter]::ToUInt32($b, $o + 16)
+            }
+          }
+          function Rva2Off([uint32]$r) {
+            foreach ($s in $secs) {
+              $span = [Math]::Max($s.Vsz, $s.Rsz)
+              if ($r -ge $s.Va -and $r -lt ($s.Va + $span)) { return $s.Ptr + ($r - $s.Va) }
+            }
+            return $null
+          }
+          $off = Rva2Off $impRva
+          $dlls = @()
+          for ($i = 0; ; $i++) {
+            $ent = $off + $i * 20
+            $chunk = 0..4 | ForEach-Object { [BitConverter]::ToUInt32($b, $ent + $_ * 4) }
+            if (($chunk | Where-Object { $_ -ne 0 }).Count -eq 0) { break }
+            $no = Rva2Off ([BitConverter]::ToUInt32($b, $ent + 12))
+            if ($null -eq $no) { break }
+            $end = $no; while ($b[$end] -ne 0) { $end++ }
+            $dlls += [Text.Encoding]::ASCII.GetString($b, $no, $end - $no)
+          }
+          Write-Host "Imported DLLs:"
+          $dlls | Sort-Object | ForEach-Object { Write-Host "  $_" }
+          if (($dlls -join "`n") -match 'VCRUNTIME\d+\.dll') {
+            Write-Error "connecto.exe still imports the VC++ runtime; the static CRT link did not take effect."
+            exit 1
+          }
+          Write-Host "OK: no VCRUNTIME import - binary does not need the VC++ Redistributable."
 
       - name: Package (Unix)
         if: matrix.os != 'windows-latest'
