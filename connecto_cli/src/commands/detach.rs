@@ -209,8 +209,23 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn quoting_escapes_embedded_quotes_and_trailing_backslashes() {
+    fn quoting_escapes_embedded_quotes() {
         assert_eq!(quote_win(r#"a"b"#), r#""a\"b""#);
-        assert_eq!(quote_win(r"c:\dir\"), r#""c:\dir\\""#);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn quoting_leaves_a_trailing_backslash_alone_when_no_quoting_is_needed() {
+        // Nothing to escape: with no spaces or quotes the argument is passed through
+        // verbatim, so the trailing backslash is harmless.
+        assert_eq!(quote_win(r"c:\dir\"), r"c:\dir\");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn quoting_doubles_trailing_backslashes_inside_quotes() {
+        // This is the case that actually matters: once the argument is wrapped in
+        // quotes, a trailing backslash would escape the closing quote unless doubled.
+        assert_eq!(quote_win(r"c:\my dir\"), "\"c:\\my dir\\\\\"");
     }
 }
