@@ -1,5 +1,6 @@
 //! CLI command implementations
 
+pub mod detach;
 pub mod hosts;
 pub mod keygen;
 pub mod keys;

@@ -82,6 +82,15 @@ enum Commands {
         /// Enable Bluetooth Low Energy advertising (Linux only)
         #[arg(long)]
         bluetooth: bool,
+
+        /// Run the listener in the background and return immediately.
+        ///
+        /// Use this when starting the listener over SSH: Windows terminates a
+        /// session's processes when the connection closes, so an attached
+        /// listener dies as soon as you disconnect and pairing then fails with
+        /// "connection refused".
+        #[arg(long)]
+        detach: bool,
     },
 
     /// Scan the local network for devices running Connecto
@@ -308,7 +317,21 @@ async fn run(cli: Cli) -> Result<()> {
             continuous,
             adhoc,
             bluetooth,
+            detach,
         } => {
+            if detach {
+                let exe = std::env::current_exe()
+                    .map_err(|e| anyhow::anyhow!("could not locate the connecto binary: {e}"))?;
+                let args = commands::detach::listen_argv(
+                    port, &name, verify, continuous, adhoc, bluetooth,
+                );
+                let pid = commands::detach::spawn_detached(exe, &args)?;
+                commands::success(&format!("Listener running in the background (pid {pid})"));
+                commands::info(&format!(
+                    "Pair to this machine on port {port}, then the listener exits on its own."
+                ));
+                return Ok(());
+            }
             commands::listen::run_with_adhoc(port, name, verify, continuous, adhoc, bluetooth).await
         }
         Commands::Scan {
@@ -520,6 +543,7 @@ mod tests {
                 continuous,
                 adhoc,
                 bluetooth,
+                detach,
             } => {
                 assert_eq!(port, connecto_core::DEFAULT_PORT);
                 assert!(name.is_none());
@@ -527,7 +551,17 @@ mod tests {
                 assert!(!continuous);
                 assert!(!adhoc);
                 assert!(!bluetooth);
+                assert!(!detach);
             }
+            _ => panic!("Expected Listen command"),
+        }
+    }
+
+    #[test]
+    fn test_listen_detach_flag() {
+        let cli = Cli::try_parse_from(["connecto", "listen", "--detach"]).unwrap();
+        match cli.command {
+            Commands::Listen { detach, .. } => assert!(detach),
             _ => panic!("Expected Listen command"),
         }
     }
