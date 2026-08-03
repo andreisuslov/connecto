@@ -18,6 +18,15 @@ connecto pair 0
 ssh mydesktop  # It just works!
 ```
 
+**Starting the listener over SSH?** Use `--detach`:
+```bash
+connecto listen --detach   # returns immediately, prints the pid
+```
+Windows terminates a session's processes when the SSH connection closes, so an
+attached listener dies the moment you disconnect — pairing then fails with
+"connection refused" even though the listener reported that it had started.
+`--detach` starts it outside the session so it survives.
+
 ## Installation
 
 ```bash
