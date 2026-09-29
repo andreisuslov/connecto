@@ -155,6 +155,25 @@ pub async fn run(
                 }
             }
             println!();
+
+            // Pairing only installs the key; confirm something on the target
+            // accepts SSH connections so "ssh <alias>" will work.
+            if !super::ssh::port_open(&primary_ip, super::ssh::SSH_PORT).await {
+                error(&format!(
+                    "The key is installed, but {} is not accepting SSH connections on port {}.",
+                    primary_ip,
+                    super::ssh::SSH_PORT
+                ));
+                println!(
+                    "  {} On {}, run {} (as Administrator/root), or re-run {} with a current connecto.",
+                    "→".cyan(),
+                    pairing_result.server_name.cyan(),
+                    "connecto ssh on".cyan(),
+                    "connecto listen".cyan()
+                );
+                println!();
+                return Err(SilentExit.into());
+            }
         }
         Err(e) => {
             error(&format!("Pairing failed: {}", e));

@@ -179,7 +179,9 @@ connecto test mydesktop
 ## Exit status
 
 `pair` exits non-zero when pairing fails (connection refused, rejected by the
-listener, invalid key, ...), so it is safe to chain in scripts:
+listener, invalid key, ...). It also exits non-zero when the key was installed
+but the target does not accept connections on SSH port 22, so it is safe to
+chain in scripts:
 
 ```bash
 connecto pair 0 && ssh mydesktop
