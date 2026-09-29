@@ -3,6 +3,7 @@
 use crate::SilentExit;
 use anyhow::Result;
 use colored::Colorize;
+use std::process::Output;
 use tokio::process::Command;
 
 /// Check for Administrator privileges without blocking the async runtime
@@ -30,80 +31,10 @@ pub(super) async fn enable() -> Result<()> {
     println!("{} Enabling OpenSSH Server...", "→".cyan());
     println!();
 
-    // Check if OpenSSH Server is installed
-    println!("{} Checking OpenSSH Server installation...", "→".cyan());
-
-    // First check if sshd service already exists (works on all Windows versions)
-    let service_check = Command::new("powershell")
-        .args([
-            "-Command",
-            "Get-Service sshd -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name",
-        ])
-        .output()
-        .await?;
-
-    let sshd_exists = !String::from_utf8_lossy(&service_check.stdout)
-        .trim()
-        .is_empty();
-
-    if sshd_exists {
+    if sshd_exists().await? {
         println!("{} OpenSSH Server already installed.", "✓".green());
     } else {
-        // Try Windows 10/Server 2016+ method first (Add-WindowsCapability)
-        let capability_check = Command::new("powershell")
-            .args([
-                "-Command",
-                "Get-Command Add-WindowsCapability -ErrorAction SilentlyContinue",
-            ])
-            .output()
-            .await?;
-
-        if capability_check.status.success()
-            && !String::from_utf8_lossy(&capability_check.stdout)
-                .trim()
-                .is_empty()
-        {
-            // Modern Windows - use Add-WindowsCapability
-            println!("{} Installing OpenSSH Server...", "→".cyan());
-
-            let install_output = Command::new("powershell")
-                .args([
-                    "-Command",
-                    "Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0",
-                ])
-                .output()
-                .await?;
-
-            if !install_output.status.success() {
-                let stderr = String::from_utf8_lossy(&install_output.stderr);
-                println!("{} Failed to install OpenSSH Server.", "✗".red());
-                if !stderr.is_empty() {
-                    println!("{}", stderr.dimmed());
-                }
-                return Err(SilentExit.into());
-            }
-
-            println!("{} OpenSSH Server installed.", "✓".green());
-        } else {
-            // Older Windows (Server 2012 R2, etc.) - OpenSSH must be installed manually
-            println!("{} OpenSSH Server is not installed.", "✗".red());
-            println!();
-            println!("Your Windows version requires manual OpenSSH installation:");
-            println!();
-            println!("  1. Download OpenSSH from:");
-            println!(
-                "     {}",
-                "https://github.com/PowerShell/Win32-OpenSSH/releases".cyan()
-            );
-            println!();
-            println!("  2. Extract to C:\\Program Files\\OpenSSH");
-            println!();
-            println!("  3. Run as Administrator:");
-            println!("     {}", "powershell -ExecutionPolicy Bypass -File \"C:\\Program Files\\OpenSSH\\install-sshd.ps1\"".dimmed());
-            println!();
-            println!("  4. Then run {} again.", "connecto ssh on".cyan());
-            return Err(SilentExit.into());
-        }
+        install().await?;
     }
 
     // Start the sshd service
@@ -172,6 +103,142 @@ pub(super) async fn enable() -> Result<()> {
 
     super::print_success_message();
     Ok(())
+}
+
+/// Windows capability name of the inbox OpenSSH Server
+const CAPABILITY: &str = "OpenSSH.Server~~~~0.0.1.0";
+
+/// Downloads the latest Win32-OpenSSH x64 MSI from GitHub and installs only
+/// its Server feature. Failures are thrown, so they land on stderr.
+const MSI_INSTALL_SCRIPT: &str = r#"
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$release = Invoke-RestMethod 'https://api.github.com/repos/PowerShell/Win32-OpenSSH/releases/latest'
+$asset = $release.assets | Where-Object { $_.name -like 'OpenSSH-Win64-*.msi' } | Select-Object -First 1
+if (-not $asset) { throw 'The latest Win32-OpenSSH release has no OpenSSH-Win64 MSI' }
+$msi = Join-Path $env:TEMP $asset.name
+Invoke-WebRequest $asset.browser_download_url -OutFile $msi -UseBasicParsing
+$p = Start-Process msiexec.exe -ArgumentList '/i', "`"$msi`"", '/qn', 'ADDLOCAL=Server' -Wait -PassThru
+Remove-Item $msi -ErrorAction SilentlyContinue
+if ($p.ExitCode -notin 0, 3010) { throw "msiexec exited with code $($p.ExitCode)" }
+"#;
+
+async fn powershell(script: &str) -> Result<Output> {
+    Ok(Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .await?)
+}
+
+fn stdout_of(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn print_stderr(output: &Output) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.trim().is_empty() {
+        println!("{}", stderr.trim_end().dimmed());
+    }
+}
+
+async fn sshd_exists() -> Result<bool> {
+    let output = powershell(
+        "Get-Service sshd -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name",
+    )
+    .await?;
+    Ok(!stdout_of(&output).is_empty())
+}
+
+async fn add_capability() -> Result<Output> {
+    powershell(&format!(
+        "Add-WindowsCapability -Online -Name {CAPABILITY} | Out-Null"
+    ))
+    .await
+}
+
+/// Install OpenSSH Server until the sshd service exists.
+///
+/// Success is judged by the service, never by an installer's exit code: on a
+/// Windows image with a torn servicing store, Add-WindowsCapability reports
+/// success while the package stays staged ("InstallPending") and no service
+/// is registered. Removing the capability clears that record; if Windows
+/// cannot provide the capability at all, the Win32-OpenSSH MSI is used.
+async fn install() -> Result<()> {
+    println!("{} Installing OpenSSH Server...", "→".cyan());
+
+    let has_capabilities = !stdout_of(
+        &powershell("Get-Command Add-WindowsCapability -ErrorAction SilentlyContinue").await?,
+    )
+    .is_empty();
+
+    if has_capabilities {
+        let added = add_capability().await?;
+        if sshd_exists().await? {
+            println!("{} OpenSSH Server installed.", "✓".green());
+            return Ok(());
+        }
+
+        let state = stdout_of(
+            &powershell(&format!(
+                "(Get-WindowsCapability -Online -Name {CAPABILITY}).State"
+            ))
+            .await?,
+        );
+        println!(
+            "{} Windows reports OpenSSH Server as '{}', but the sshd service does not exist.",
+            "!".yellow(),
+            state
+        );
+        print_stderr(&added);
+
+        if state == "InstallPending" || state == "Installed" {
+            println!(
+                "{} Removing the broken OpenSSH Server install...",
+                "→".cyan()
+            );
+            let removed = powershell(&format!(
+                "(Remove-WindowsCapability -Online -Name {CAPABILITY}).RestartNeeded"
+            ))
+            .await?;
+            if stdout_of(&removed) == "True" {
+                println!(
+                    "{} Windows must restart to finish removing the broken install.",
+                    "✗".red()
+                );
+                println!("  Restart this machine, then run this command again.");
+                return Err(SilentExit.into());
+            }
+            print_stderr(&removed);
+
+            let added = add_capability().await?;
+            if sshd_exists().await? {
+                println!("{} OpenSSH Server installed.", "✓".green());
+                return Ok(());
+            }
+            print_stderr(&added);
+        }
+    }
+
+    println!(
+        "{} Installing OpenSSH Server from the Win32-OpenSSH release (MSI)...",
+        "→".cyan()
+    );
+    let msi = powershell(MSI_INSTALL_SCRIPT).await?;
+    if sshd_exists().await? {
+        println!("{} OpenSSH Server installed.", "✓".green());
+        return Ok(());
+    }
+
+    println!("{} Failed to install OpenSSH Server.", "✗".red());
+    print_stderr(&msi);
+    println!();
+    println!(
+        "Install it manually from {}, then run {} again.",
+        "https://github.com/PowerShell/Win32-OpenSSH/releases".cyan(),
+        "connecto ssh on".cyan()
+    );
+    Err(SilentExit.into())
 }
 
 pub(super) async fn disable() -> Result<()> {
