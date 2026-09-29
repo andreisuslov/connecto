@@ -12,10 +12,14 @@ connecto listen [OPTIONS]
 
 The `listen` command starts a pairing listener on the current machine. It:
 
-1. Advertises the device via mDNS on the local network
-2. Waits for incoming pairing requests on TCP port 8099
-3. Accepts public keys and adds them to `~/.ssh/authorized_keys`
-4. Exits after successful pairing (unless `--continuous` is used)
+1. Makes sure the SSH server is running on port 22, enabling it the same way
+   `connecto ssh on` does when it is down (needs Administrator on Windows, root
+   on macOS/Linux; without it `listen` exits with an error instead of accepting
+   keys nobody can use)
+2. Advertises the device via mDNS on the local network
+3. Waits for incoming pairing requests on TCP port 8099
+4. Accepts public keys and adds them to `~/.ssh/authorized_keys`
+5. Exits after successful pairing (unless `--continuous` is used)
 
 ## Options
 

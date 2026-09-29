@@ -319,6 +319,8 @@ async fn run(cli: Cli) -> Result<()> {
             bluetooth,
             detach,
         } => {
+            // Before detaching, so a failure is reported on this terminal
+            commands::ssh::ensure_running().await?;
             if detach {
                 let exe = std::env::current_exe()
                     .map_err(|e| anyhow::anyhow!("could not locate the connecto binary: {e}"))?;
