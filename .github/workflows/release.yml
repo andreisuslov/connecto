@@ -166,6 +166,7 @@ jobs:
           path: |
             ${{ matrix.asset_name }}.${{ matrix.archive }}
             ${{ matrix.asset_name }}.${{ matrix.archive }}.sha256
+          retention-days: 1
 
   release:
     name: Create Release
